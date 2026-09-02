@@ -178,9 +178,11 @@ if (USE_PARALLEL) {
   cl <- makeCluster(N_CORES)
   on.exit(try(stopCluster(cl), silent = TRUE), add = TRUE)
   clusterEvalQ(cl, library(forecast))
-  clusterExport(cl, c("cand_grid", "MIN_TRAIN", "ORIGIN_STEP", "H_CV", "H_REPORT"),
-                envir = environment())
-  clusterExport(cl, c("G_MAX_PA", "G_MIN_PA"), envir = environment())
+  ## The workers are fresh R sessions: the FUNCTION must be exported too,
+  ## not just the data it uses.
+  clusterExport(cl, c("cv_one", "cand_grid", "MIN_TRAIN", "ORIGIN_STEP",
+                      "H_CV", "H_REPORT", "G_MAX_PA", "G_MIN_PA"),
+                envir = globalenv())
   cv_list <- parLapplyLB(cl, cu_series[cv_ids], function(s)
     cv_one(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT,
            G_MAX_PA, G_MIN_PA))
