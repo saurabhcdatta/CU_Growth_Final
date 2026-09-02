@@ -50,6 +50,18 @@ cand_grid <- tibble::tribble(
 )
 nrow(cand_grid)
 
+## Each institution also gets an auto.arima-nominated candidate, added to
+## the grid and scored on the same origins as everything else. auto.arima
+## selects by AICc, which is close to one-step-ahead fit -- not what matters
+## at a 20-quarter horizon -- so it proposes rather than decides.
+##
+## It is constrained: d is FORCED to 1. Left free it can choose d = 0, which
+## makes assets mean-reverting so the forecast decays to a historical
+## average, or d = 2, which gives a quadratic and therefore explosive trend.
+## Those are precisely the two failure modes the guardrails exist to stop.
+## It is nominated on the FIRST training window only, so the choice is made
+## ex ante and does not see the data it is later scored against.
+##
 ## Two non-ARIMA benchmarks compete on the same origins:
 ##   Simple growth  random walk with drift set to the MEDIAN quarterly log
 ##                  change, which one acquisition barely moves
@@ -70,8 +82,35 @@ cv_one <- function(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT,
   origins <- seq(MIN_TRAIN, n - 1, by = ORIGIN_STEP)
   if (length(origins) < 4) return(NULL)
 
+  ## ---- auto.arima nomination, on the first training window only --------
+  cand_local <- cand_grid
+  Xa <- X[1:MIN_TRAIN, , drop = FALSE]
+  ka <- apply(Xa, 2, function(z) length(unique(z)) > 1)
+  aa <- tryCatch(forecast::auto.arima(ts(y[1:MIN_TRAIN], frequency = 4),
+      xreg = if (any(ka)) Xa[, ka, drop = FALSE] else NULL,
+      d = 1, max.d = 1, max.D = 1, max.p = 3, max.q = 3, max.P = 1, max.Q = 1,
+      allowdrift = TRUE, seasonal = TRUE, stepwise = FALSE,
+      approximation = FALSE),
+    error = function(e) NULL, warning = function(w) NULL)
+
+  if (!is.null(aa)) {
+    o <- forecast::arimaorder(aa)
+    o <- if (length(o) == 3) c(o, 0, 0, 0) else o
+    newrow <- data.frame(p = o[1], d = 1, q = o[3], P = o[4], D = o[5], Q = o[6],
+                         drift = "drift" %in% names(coef(aa)),
+                         label = sprintf("auto.arima(%d,1,%d)(%d,%d,%d)[4]%s",
+                                         o[1], o[3], o[4], o[5], o[6],
+                                         ifelse("drift" %in% names(coef(aa)),
+                                                " w/ drift", "")),
+                         stringsAsFactors = FALSE)
+    dup <- any(cand_local$p == newrow$p & cand_local$q == newrow$q &
+               cand_local$P == newrow$P & cand_local$D == newrow$D &
+               cand_local$Q == newrow$Q & cand_local$drift == newrow$drift)
+    if (!dup) cand_local <- rbind(cand_local, newrow)
+  }
+
   NB <- 2                                  # benchmark slots
-  err <- array(NA_real_, dim = c(length(origins), H_CV, nrow(cand_grid) + NB))
+  err <- array(NA_real_, dim = c(length(origins), H_CV, nrow(cand_local) + NB))
 
   for (oi in seq_along(origins)) {
     n_tr <- origins[oi]
@@ -84,13 +123,13 @@ cv_one <- function(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT,
     Xtr2 <- if (any(keep)) Xtr[, keep, drop = FALSE] else NULL
     Xfu2 <- if (any(keep)) Xfu[, keep, drop = FALSE] else NULL
 
-    for (k in seq_len(nrow(cand_grid))) {
+    for (k in seq_len(nrow(cand_local))) {
       fit <- tryCatch(
         forecast::Arima(ytr,
-          order    = c(cand_grid$p[k], cand_grid$d[k], cand_grid$q[k]),
-          seasonal = list(order = c(cand_grid$P[k], cand_grid$D[k],
-                                    cand_grid$Q[k]), period = 4),
-          xreg = Xtr2, include.drift = cand_grid$drift[k], method = "ML"),
+          order    = c(cand_local$p[k], cand_local$d[k], cand_local$q[k]),
+          seasonal = list(order = c(cand_local$P[k], cand_local$D[k],
+                                    cand_local$Q[k]), period = 4),
+          xreg = Xtr2, include.drift = cand_local$drift[k], method = "ML"),
         error = function(e) NULL, warning = function(w) NULL)
       if (is.null(fit)) next
 
@@ -106,14 +145,23 @@ cv_one <- function(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT,
     ## Benchmarks, scored on exactly the same origins and horizons
     act <- y[(n_tr + 1):(n_tr + h_o)]
     g_s <- stats::median(diff(y[1:n_tr]))
-    err[oi, seq_len(h_o), nrow(cand_grid) + 1] <- act - (y[n_tr] + g_s * seq_len(h_o))
-    err[oi, seq_len(h_o), nrow(cand_grid) + 2] <- act - y[n_tr]
+    err[oi, seq_len(h_o), nrow(cand_local) + 1] <- act - (y[n_tr] + g_s * seq_len(h_o))
+    err[oi, seq_len(h_o), nrow(cand_local) + 2] <- act - y[n_tr]
   }
 
+  ## The orders travel with the scores. cand_id is no longer a row index
+  ## into a shared grid, because the grid now differs per institution.
   sc <- data.frame(
-    cand_id = c(seq_len(nrow(cand_grid)), -1L, -2L),
-    spec = c(cand_grid$label, "Simple growth rate (median drift)",
+    cand_id = c(seq_len(nrow(cand_local)), -1L, -2L),
+    spec = c(cand_local$label, "Simple growth rate (median drift)",
              "Flat (last value carried forward)"),
+    p     = c(cand_local$p,     NA, NA),
+    d     = c(cand_local$d,     NA, NA),
+    q     = c(cand_local$q,     NA, NA),
+    P     = c(cand_local$P,     NA, NA),
+    D     = c(cand_local$D,     NA, NA),
+    Q     = c(cand_local$Q,     NA, NA),
+    drift = c(cand_local$drift, NA, NA),
     stringsAsFactors = FALSE)
   sc$n_fits   <- apply(err, 3, function(m) sum(!is.na(m[, 1])))
   sc$rmse_all <- apply(err, 3, function(m) sqrt(mean(m^2, na.rm = TRUE)))
@@ -140,12 +188,12 @@ cv_one <- function(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT,
   }
 
   sc$g_pa_full <- NA_real_
-  for (k in seq_len(nrow(cand_grid))) {
+  for (k in seq_len(nrow(cand_local))) {
     ff <- tryCatch(forecast::Arima(yfull,
-        order = c(cand_grid$p[k], cand_grid$d[k], cand_grid$q[k]),
-        seasonal = list(order = c(cand_grid$P[k], cand_grid$D[k],
-                                  cand_grid$Q[k]), period = 4),
-        xreg = Xff, include.drift = cand_grid$drift[k], method = "ML"),
+        order = c(cand_local$p[k], cand_local$d[k], cand_local$q[k]),
+        seasonal = list(order = c(cand_local$P[k], cand_local$D[k],
+                                  cand_local$Q[k]), period = 4),
+        xreg = Xff, include.drift = cand_local$drift[k], method = "ML"),
       error = function(e) NULL, warning = function(w) NULL)
     if (is.null(ff)) next
     fcf <- tryCatch(as.numeric(forecast::forecast(ff, h = 20, xreg = Xnf)$mean),
@@ -204,8 +252,8 @@ cv_scores <- bind_rows(cv_list[!sapply(cv_list, is.null)])
 nrow(cv_scores)
 
 cv_winners <- cv_scores %>% filter(rank == 1) %>%
-  select(join_number, spec, cand_id, rmse_all, rmse_h4, rmse_h12, rmse_h20,
-         g_pa_full, plausible)
+  select(join_number, spec, cand_id, p, d, q, P, D, Q, drift,
+         rmse_all, rmse_h4, rmse_h12, rmse_h20, g_pa_full, plausible)
 
 nrow(cv_winners)
 table(cv_winners$spec)
@@ -214,6 +262,8 @@ table(cv_winners$spec)
 cat("\nWon by simple growth rate:", sum(cv_winners$cand_id == -1), "\n")
 cat("Won by flat:", sum(cv_winners$cand_id == -2), "\n")
 cat("Won by an ARIMA:", sum(cv_winners$cand_id > 0), "\n")
+cat("Won by the auto.arima nomination:",
+    sum(grepl("^auto.arima", cv_winners$spec)), "\n")
 
 ## How much of the candidate space the plausibility screen removed
 cv_scores %>% group_by(cand_id) %>%
