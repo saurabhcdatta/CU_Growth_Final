@@ -25,6 +25,11 @@ N_CORES
 ## Credit unions with too little history for CV get a peer-based fallback
 ## in script 12 instead; they are flagged, not silently modelled.
 MIN_FOR_CV <- MIN_TRAIN + 8
+
+## Plausibility band used to screen candidates. A model that forecasts
+## outside this is not eligible to win, however well it cross-validated.
+G_MAX_PA <- 0.25
+G_MIN_PA <- -0.15
 cv_ids <- which(n_obs_vec >= MIN_FOR_CV)
 length(cv_ids); nrow(cohort) - length(cv_ids)
 
@@ -45,18 +50,28 @@ cand_grid <- tibble::tribble(
 )
 nrow(cand_grid)
 
+## Two non-ARIMA benchmarks compete on the same origins:
+##   Simple growth  random walk with drift set to the MEDIAN quarterly log
+##                  change, which one acquisition barely moves
+##   Flat           last value carried forward
+## Putting them in the competition rather than holding them as a fallback
+## means cross-validation decides whether an ARIMA is worth having at all.
+## They carry cand_id -1 and -2 so script 12 can recognise them.
+
 ## ---------------------------------------------------------------------
 ## [11.2] The worker. One credit union in, its CV scores out.
 ## Regressor columns that are constant inside a training window are dropped
 ## for that window -- otherwise Arima fails on a collinear xreg.
 ## ---------------------------------------------------------------------
-cv_one <- function(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT) {
+cv_one <- function(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT,
+                   G_MAX_PA, G_MIN_PA) {
 
   y <- s$y; X <- s$xreg; n <- s$n
   origins <- seq(MIN_TRAIN, n - 1, by = ORIGIN_STEP)
   if (length(origins) < 4) return(NULL)
 
-  err <- array(NA_real_, dim = c(length(origins), H_CV, nrow(cand_grid)))
+  NB <- 2                                  # benchmark slots
+  err <- array(NA_real_, dim = c(length(origins), H_CV, nrow(cand_grid) + NB))
 
   for (oi in seq_along(origins)) {
     n_tr <- origins[oi]
@@ -87,21 +102,69 @@ cv_one <- function(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT) {
       ## credit unions are scored comparably.
       err[oi, seq_len(h_o), k] <- y[(n_tr + 1):(n_tr + h_o)] - fc
     }
+
+    ## Benchmarks, scored on exactly the same origins and horizons
+    act <- y[(n_tr + 1):(n_tr + h_o)]
+    g_s <- stats::median(diff(y[1:n_tr]))
+    err[oi, seq_len(h_o), nrow(cand_grid) + 1] <- act - (y[n_tr] + g_s * seq_len(h_o))
+    err[oi, seq_len(h_o), nrow(cand_grid) + 2] <- act - y[n_tr]
   }
 
-  sc <- data.frame(cand_id = seq_len(nrow(cand_grid)), spec = cand_grid$label,
-                   stringsAsFactors = FALSE)
+  sc <- data.frame(
+    cand_id = c(seq_len(nrow(cand_grid)), -1L, -2L),
+    spec = c(cand_grid$label, "Simple growth rate (median drift)",
+             "Flat (last value carried forward)"),
+    stringsAsFactors = FALSE)
   sc$n_fits   <- apply(err, 3, function(m) sum(!is.na(m[, 1])))
   sc$rmse_all <- apply(err, 3, function(m) sqrt(mean(m^2, na.rm = TRUE)))
   for (h in H_REPORT)
     sc[[paste0("rmse_h", h)]] <- apply(err, 3, function(m)
       sqrt(mean(m[, h]^2, na.rm = TRUE)))
 
+  ## -------------------------------------------------------------------
+  ## Full-sample plausibility screen. Fit each candidate on everything and
+  ## look at where it actually goes over 20 quarters. A candidate that runs
+  ## outside the growth band is marked implausible and cannot win, however
+  ## good its cross-validated error was. Script 12 walks this ranking.
+  ## -------------------------------------------------------------------
+  yfull <- ts(y, frequency = 4)
+  keepf <- apply(X, 2, function(z) length(unique(z)) > 1)
+  Xff <- if (any(keepf)) X[, keepf, drop = FALSE] else NULL
+  Xnf <- NULL
+  if (!is.null(Xff)) {
+    lastr <- X[nrow(X), keepf, drop = FALSE]
+    Xnf <- matrix(rep(lastr, each = 20), nrow = 20,
+                  dimnames = list(NULL, colnames(X)[keepf]))
+    for (cc in intersect(colnames(Xnf), c("rec0709", "rec2020", "rateshock")))
+      Xnf[, cc] <- 0
+  }
+
+  sc$g_pa_full <- NA_real_
+  for (k in seq_len(nrow(cand_grid))) {
+    ff <- tryCatch(forecast::Arima(yfull,
+        order = c(cand_grid$p[k], cand_grid$d[k], cand_grid$q[k]),
+        seasonal = list(order = c(cand_grid$P[k], cand_grid$D[k],
+                                  cand_grid$Q[k]), period = 4),
+        xreg = Xff, include.drift = cand_grid$drift[k], method = "ML"),
+      error = function(e) NULL, warning = function(w) NULL)
+    if (is.null(ff)) next
+    fcf <- tryCatch(as.numeric(forecast::forecast(ff, h = 20, xreg = Xnf)$mean),
+                    error = function(e) NULL)
+    if (is.null(fcf) || any(!is.finite(fcf))) next
+    sc$g_pa_full[k] <- (fcf[20] - y[n]) / 5      # annual log growth
+  }
+  sc$g_pa_full[sc$cand_id == -1L] <- stats::median(diff(y)) * 4
+  sc$g_pa_full[sc$cand_id == -2L] <- 0
+
+  sc$plausible <- !is.na(sc$g_pa_full) &
+    sc$g_pa_full <= G_MAX_PA & sc$g_pa_full >= G_MIN_PA
+
   sc$eligible <- sc$n_fits >= 0.8 * length(origins) & is.finite(sc$rmse_all)
-  sc <- sc[order(-sc$eligible, sc$rmse_all), ]
+  ## Rank on error, but implausible candidates sort below plausible ones
+  sc <- sc[order(-sc$eligible, -sc$plausible, sc$rmse_all), ]
   sc$rank <- seq_len(nrow(sc))
   sc$join_number <- s$join_number
-  sc[1:min(5, nrow(sc)), ]      # keep the top five, not all eight
+  sc[1:min(6, nrow(sc)), ]      # top six, so script 12 has a ranking to walk
 }
 
 ## ---------------------------------------------------------------------
@@ -117,14 +180,16 @@ if (USE_PARALLEL) {
   clusterEvalQ(cl, library(forecast))
   clusterExport(cl, c("cand_grid", "MIN_TRAIN", "ORIGIN_STEP", "H_CV", "H_REPORT"),
                 envir = environment())
+  clusterExport(cl, c("G_MAX_PA", "G_MIN_PA"), envir = environment())
   cv_list <- parLapplyLB(cl, cu_series[cv_ids], function(s)
-    cv_one(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT))
+    cv_one(s, cand_grid, MIN_TRAIN, ORIGIN_STEP, H_CV, H_REPORT,
+           G_MAX_PA, G_MIN_PA))
   stopCluster(cl)
 } else {
   cv_list <- vector("list", length(cv_ids))
   for (j in seq_along(cv_ids)) {
     cv_list[[j]] <- cv_one(cu_series[[cv_ids[j]]], cand_grid, MIN_TRAIN,
-                           ORIGIN_STEP, H_CV, H_REPORT)
+                           ORIGIN_STEP, H_CV, H_REPORT, G_MAX_PA, G_MIN_PA)
     if (j %% 100 == 0)
       cat(sprintf("%5d/%5d  (%s elapsed)\n", j, length(cv_ids),
                   format(round(difftime(Sys.time(), t0, units = "mins"), 1))))
@@ -137,10 +202,27 @@ cv_scores <- bind_rows(cv_list[!sapply(cv_list, is.null)])
 nrow(cv_scores)
 
 cv_winners <- cv_scores %>% filter(rank == 1) %>%
-  select(join_number, spec, cand_id, rmse_all, rmse_h4, rmse_h12, rmse_h20)
+  select(join_number, spec, cand_id, rmse_all, rmse_h4, rmse_h12, rmse_h20,
+         g_pa_full, plausible)
 
 nrow(cv_winners)
 table(cv_winners$spec)
+
+## How often did an ARIMA actually beat the simple benchmarks
+cat("\nWon by simple growth rate:", sum(cv_winners$cand_id == -1), "\n")
+cat("Won by flat:", sum(cv_winners$cand_id == -2), "\n")
+cat("Won by an ARIMA:", sum(cv_winners$cand_id > 0), "\n")
+
+## How much of the candidate space the plausibility screen removed
+cv_scores %>% group_by(cand_id) %>%
+  summarise(spec = first(spec), n = n(),
+            pct_implausible = round(100 * mean(!plausible), 1)) %>%
+  arrange(desc(n)) %>% as.data.frame()
+
+## Winners whose own forecast still sits near the edge of the band
+cv_winners %>%
+  mutate(pa = round(100 * (exp(g_pa_full) - 1), 1)) %>%
+  filter(abs(pa) > 20) %>% nrow()
 
 ## Which credit unions did not get a CV-selected model
 no_cv <- setdiff(cohort$join_number, cv_winners$join_number)
