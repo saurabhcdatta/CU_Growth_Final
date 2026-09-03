@@ -70,6 +70,20 @@ ENV_WIDEN <- 0.02     # widen 2pp each side, so a flat institution is not
 ENV_MIN_W <- 8        # windows required before an institution's own envelope
                       # is trusted; below this its peer group is used
 
+## ---- Measured bias correction ---------------------------------------
+## Script 15's holdout backtest found the projections overshoot by a median
+## of 1.05% a year: 4,170 institutions, two years hidden, median forecast
+## error +2.11%. This subtracts that overshoot so the paths are centred.
+##
+## It is measured, not chosen. Two caveats belong on the Method tab:
+## the window it was measured over (2024Q3-2026Q2) followed the pandemic
+## deposit surge, and it assumes the overshoot accrues evenly per year.
+##
+## Re-measure it after each refresh: take annual_bias_pct from block 15.5b
+## and set the value below. Set to 0 to disable.
+BIAS_PA <- 0.0105     # 1.05% a year, from 15.5b
+BIAS_Q  <- log(1 + BIAS_PA) / 4     # per quarter, on the log scale
+
 ## ---------------------------------------------------------------------
 ## [12.1] Refit the CV winner and project (unchanged from before)
 ## ---------------------------------------------------------------------
@@ -332,8 +346,19 @@ base <- base %>%
     shrink_w = ifelse(is.na(cv_rmse_h20), 0.4,
                       SHRINK_K / (SHRINK_K + cv_rmse_h20)),
     shrink_w = ifelse(grepl("^Peer", basis), 0, shrink_w),
-    g_final = shrink_w * g_clip + (1 - shrink_w) *
-              pmin(pmax(g_peer, g_cap_dn), g_cap_up))
+    g_blend = shrink_w * g_clip + (1 - shrink_w) *
+              pmin(pmax(g_peer, g_cap_dn), g_cap_up),
+
+    ## Apply the measured overshoot correction, then re-clip so the
+    ## correction cannot push a path outside the envelope or jump ceiling.
+    g_final = pmin(pmax(g_blend - BIAS_Q, g_cap_dn), g_cap_up))
+
+## What the correction did
+cat("\nBias correction:", round(100 * BIAS_PA, 2), "% a year\n")
+cat("Median growth before:", round(100 * (exp(median(base$g_blend) * 4) - 1), 2), "%\n")
+cat("Median growth after :", round(100 * (exp(median(base$g_final) * 4) - 1), 2), "%\n")
+cat("Institutions whose growth actually moved:",
+    sum(abs(base$g_final - base$g_blend) > 1e-9), "of", nrow(base), "\n")
 
 table(base$basis)
 round(100 * table(base$basis) / nrow(base), 1)
@@ -385,7 +410,9 @@ audit <- cu %>%
     peer_envelope = sum(!use_own_env),
     max_growth_pa = max(growth_pa), min_growth_pa = min(growth_pa),
     max_jump      = max(abs(jump_5Yr)),
-    moved_up      = sum(move_5Yr == "Up"), moved_down = sum(move_5Yr == "Down"))
+    moved_up      = sum(move_5Yr == "Up"), moved_down = sum(move_5Yr == "Down"),
+    up_down_ratio = round(sum(move_5Yr == "Up") /
+                          pmax(sum(move_5Yr == "Down"), 1), 1))
 
 as.data.frame(t(audit))
 
@@ -428,10 +455,52 @@ bu_counts <- bind_rows(lapply(H_NAMES, function(nm)
 bu_counts %>% group_by(horizon) %>% summarise(total = sum(count)) %>%
   as.data.frame()
 
+## ---------------------------------------------------------------------
+## [12.9] Movement check against history
+##
+## The holdout backtest showed the model reproduces upward moves well
+## (ratio 1.16) but almost never produces a downward one (ratio 0.11).
+## Downward moves come from idiosyncratic events -- a sponsor closing, a
+## large withdrawal, a loan sale -- that no smooth growth path reproduces.
+## The bias correction helps at the margin but cannot manufacture them.
+##
+## So compare the forecast's movement against the last five years of actual
+## movement for this same cohort. A large gap on the down side is expected
+## and is the reason the soft counts in script 16 are the better headline:
+## a point forecast cannot move an institution down, a distribution can.
+## ---------------------------------------------------------------------
+actual_move <- hist %>%
+  filter(q_index %in% c(N_Q - 20, N_Q)) %>%
+  mutate(cat = as.character(cut(assets_tot, BREAKS, CAT_LABELS, right = FALSE))) %>%
+  select(join_number, q_index, cat) %>%
+  pivot_wider(names_from = q_index, values_from = cat) %>%
+  setNames(c("join_number", "then", "now")) %>%
+  filter(!is.na(then), !is.na(now)) %>%
+  summarise(n = n(),
+            up   = sum(match(now, CAT_LABELS) > match(then, CAT_LABELS)),
+            down = sum(match(now, CAT_LABELS) < match(then, CAT_LABELS)),
+            same = sum(now == then))
+
+move_compare <- data.frame(
+  source = c("Actual, last 5 years", "Forecast, next 5 years"),
+  n      = c(actual_move$n, nrow(cu)),
+  up     = c(actual_move$up, sum(cu$move_5Yr == "Up")),
+  down   = c(actual_move$down, sum(cu$move_5Yr == "Down")),
+  same   = c(actual_move$same, sum(cu$move_5Yr == "Same"))) %>%
+  mutate(pct_up = round(100 * up / n, 1), pct_down = round(100 * down / n, 1),
+         up_down = round(up / pmax(down, 1), 1))
+
+print(as.data.frame(move_compare), row.names = FALSE)
+cat("\nIf the forecast up:down ratio is far above the actual one, the\n")
+cat("bucket counts lean top-heavy and the soft counts should be the\n")
+cat("published figures rather than these hard assignments.\n")
+
 saveRDS(list(cu = cu, bu_counts = bu_counts, audit = audit,
              basis_by_size = basis_by_size, env_tbl = env_tbl,
              H_SET = H_SET, H_NAMES = H_NAMES, FC_START = FC_START,
+             move_compare = move_compare,
              guardrails = list(RMSE_MAX = RMSE_MAX, G_MAX_PA = G_MAX_PA,
                                G_MIN_PA = G_MIN_PA, MAX_JUMP = MAX_JUMP,
-                               ENV_Q = ENV_Q, ENV_MIN_W = ENV_MIN_W)),
+                               ENV_Q = ENV_Q, ENV_MIN_W = ENV_MIN_W,
+                               BIAS_PA = BIAS_PA)),
         file = "cohort_fits.rds")
