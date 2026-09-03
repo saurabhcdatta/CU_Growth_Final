@@ -33,6 +33,18 @@ library(scales)
 ## fitr <- readRDS("cohort_fits.rds"); list2env(fitr, .GlobalEnv)
 
 HOLD <- 8              # quarters held out for the backtest (2 years)
+
+## The published pipeline subtracts a measured overshoot (BIAS_PA in script
+## 12). The backtest must mirror that, or it validates a model you do not
+## publish. Both are reported below:
+##   RAW        the model with no correction. This is the CALIBRATION
+##              source -- set BIAS_PA in script 12 from this figure.
+##   CORRECTED  the same model with the correction applied. This is what
+##              you actually publish, and its bias should sit near zero.
+## Do NOT feed the corrected figure back into BIAS_PA: that double-counts.
+BIAS_PA_APPLIED <- guardrails$BIAS_PA      # carried from script 12
+BIAS_Q_APPLIED  <- log(1 + BIAS_PA_APPLIED) / 4
+BIAS_PA_APPLIED
 JUMP_PCT <- 0.25       # quarter-on-quarter asset jump that looks like an event
 FROZEN_Q <- 4          # identical assets this many quarters = suspect
 
@@ -77,11 +89,12 @@ head(as.data.frame(unexplained %>% select(cu_name, asset_cat_now, max_jump_pct,
 ## ---------------------------------------------------------------------
 ## [15.2] Holdout backtest and residual diagnostics, in one pass
 ## ---------------------------------------------------------------------
-back_one <- function(s, cv_winners, HOLD, BREAKS, CAT_LABELS) {
+back_one <- function(s, cv_winners, HOLD, BREAKS, CAT_LABELS, BIAS_Q_APPLIED) {
 
   n <- s$n
   out <- data.frame(join_number = s$join_number, bt_ok = FALSE,
-                    bt_err_log = NA_real_, bt_pct_err = NA_real_,
+                    bt_err_log = NA_real_, bt_err_log_raw = NA_real_,
+                    bt_pct_err = NA_real_, bt_pct_err_raw = NA_real_,
                     bt_cat_pred = NA_character_, bt_cat_actual = NA_character_,
                     bt_cat_hit = NA, lb_p = NA_real_, resid_sd = NA_real_,
                     stringsAsFactors = FALSE)
@@ -96,11 +109,14 @@ back_one <- function(s, cv_winners, HOLD, BREAKS, CAT_LABELS) {
   ## cohort unbacktested and pushed them all into EXCLUDE.
   if (is.na(cn$p[1])) {
     g <- if (grepl("^Flat", cn$spec[1])) 0 else stats::median(diff(s$y[1:ntr]))
-    pred_log <- s$y[ntr] + g * HOLD
+    raw_log  <- s$y[ntr] + g * HOLD
+    pred_log <- raw_log - BIAS_Q_APPLIED * HOLD      # as published
     act_log  <- s$y[n]
     out$bt_ok <- TRUE
-    out$bt_err_log <- pred_log - act_log
-    out$bt_pct_err <- 100 * (exp(pred_log) / exp(act_log) - 1)
+    out$bt_err_log     <- pred_log - act_log
+    out$bt_err_log_raw <- raw_log  - act_log
+    out$bt_pct_err     <- 100 * (exp(pred_log) / exp(act_log) - 1)
+    out$bt_pct_err_raw <- 100 * (exp(raw_log)  / exp(act_log) - 1)
     out$bt_cat_pred   <- as.character(cut(exp(pred_log), BREAKS, CAT_LABELS, right = FALSE))
     out$bt_cat_actual <- as.character(cut(exp(act_log),  BREAKS, CAT_LABELS, right = FALSE))
     out$bt_cat_hit    <- out$bt_cat_pred == out$bt_cat_actual
@@ -123,12 +139,16 @@ back_one <- function(s, cv_winners, HOLD, BREAKS, CAT_LABELS) {
                  error = function(e) NULL)
   if (is.null(fc) || any(!is.finite(fc))) return(out)
 
-  pred_log <- fc[HOLD]; act_log <- s$y[n]
+  raw_log  <- fc[HOLD]
+  pred_log <- raw_log - BIAS_Q_APPLIED * HOLD        # as published
+  act_log  <- s$y[n]
   pred_a <- exp(pred_log); act_a <- exp(act_log)
 
   out$bt_ok <- TRUE
-  out$bt_err_log <- pred_log - act_log
-  out$bt_pct_err <- 100 * (pred_a / act_a - 1)
+  out$bt_err_log     <- pred_log - act_log
+  out$bt_err_log_raw <- raw_log  - act_log
+  out$bt_pct_err     <- 100 * (pred_a / act_a - 1)
+  out$bt_pct_err_raw <- 100 * (exp(raw_log) / act_a - 1)
   out$bt_cat_pred   <- as.character(cut(pred_a, BREAKS, CAT_LABELS, right = FALSE))
   out$bt_cat_actual <- as.character(cut(act_a,  BREAKS, CAT_LABELS, right = FALSE))
   out$bt_cat_hit    <- out$bt_cat_pred == out$bt_cat_actual
@@ -154,10 +174,10 @@ back_one <- function(s, cv_winners, HOLD, BREAKS, CAT_LABELS) {
 t0 <- Sys.time()
 cl <- makeCluster(max(1, parallel::detectCores(logical = FALSE) - 1))
 clusterEvalQ(cl, library(forecast))
-clusterExport(cl, c("back_one", "cv_winners", "HOLD", "BREAKS", "CAT_LABELS"),
-              envir = globalenv())
+clusterExport(cl, c("back_one", "cv_winners", "HOLD", "BREAKS", "CAT_LABELS",
+                    "BIAS_Q_APPLIED"), envir = globalenv())
 bt_list <- parLapplyLB(cl, cu_series, function(s)
-  back_one(s, cv_winners, HOLD, BREAKS, CAT_LABELS))
+  back_one(s, cv_winners, HOLD, BREAKS, CAT_LABELS, BIAS_Q_APPLIED))
 stopCluster(cl)
 difftime(Sys.time(), t0, units = "mins")
 
@@ -218,9 +238,22 @@ bias_check <- diag_cu %>% filter(bt_ok) %>%
             mean_pct_err = round(mean(bt_pct_err), 2),
             share_over = round(100 * mean(bt_pct_err > 0), 1),
             p10 = round(quantile(bt_pct_err, .10), 1),
-            p90 = round(quantile(bt_pct_err, .90), 1))
+            p90 = round(quantile(bt_pct_err, .90), 1),
+            median_pct_err_raw = round(median(bt_pct_err_raw), 2),
+            share_over_raw = round(100 * mean(bt_pct_err_raw > 0), 1))
 as.data.frame(bias_check)
-## A median far from zero means the method is biased, not merely imprecise.
+
+cat("\n--- BIAS, BEFORE AND AFTER THE CORRECTION ---\n")
+cat("Raw model       : median error", bias_check$median_pct_err_raw, "% over",
+    HOLD / 4, "years,", bias_check$share_over_raw, "% overshooting\n")
+cat("As published    : median error", bias_check$median_pct_err, "% over",
+    HOLD / 4, "years,", bias_check$share_over, "% overshooting\n")
+cat("Correction applied in script 12:", round(100 * BIAS_PA_APPLIED, 2), "% a year\n")
+cat("\nSet BIAS_PA in script 12 from the RAW figure, never the published one:\n")
+cat("re-reading the corrected figure back into BIAS_PA double-counts.\n")
+cat("Implied raw annual overshoot:",
+    round(100 * (exp(median(diag_cu$bt_err_log_raw, na.rm = TRUE) /
+                       (HOLD / 4)) - 1), 2), "%\n\n")
 
 by_size <- diag_cu %>% filter(bt_ok) %>%
   group_by(asset_cat_now) %>%
@@ -311,14 +344,18 @@ cat("A ratio near 1.0 means the movement rate is calibrated.\n")
 cat("Above ~1.3 on the up side means the projections are systematically\n")
 cat("too optimistic and every bucket count leans large.\n\n")
 
-## Implied correction: the shift in annual log growth that would have
-## equalised predicted and actual upward moves in the holdout.
+## The calibration figure for the next refresh: measured on the RAW model,
+## so it is not contaminated by the correction already applied.
 bias_g <- diag_cu %>% filter(bt_ok) %>%
-  summarise(median_log_err = median(bt_err_log, na.rm = TRUE)) %>%
-  mutate(annual_bias_pct = round(100 * (exp(median_log_err / (HOLD / 4)) - 1), 2))
+  summarise(median_log_err     = median(bt_err_log, na.rm = TRUE),
+            median_log_err_raw = median(bt_err_log_raw, na.rm = TRUE)) %>%
+  mutate(annual_bias_pct     = round(100 * (exp(median_log_err / (HOLD / 4)) - 1), 2),
+         annual_bias_pct_raw = round(100 * (exp(median_log_err_raw / (HOLD / 4)) - 1), 2))
 as.data.frame(bias_g)
-cat("Median forecast overshoot per year:", bias_g$annual_bias_pct, "%\n")
-cat("Subtracting this from g_final in script 12 would centre the paths.\n")
+cat("Residual overshoot after correction:", bias_g$annual_bias_pct,
+    "% a year (should be near zero)\n")
+cat("Raw overshoot, for setting BIAS_PA next refresh:",
+    bias_g$annual_bias_pct_raw, "% a year\n")
 
 ## ---------------------------------------------------------------------
 ## [15.6] Spot-check plots: every EXCLUDE, plus a random sample of OK
