@@ -88,10 +88,25 @@ back_one <- function(s, cv_winners, HOLD, BREAKS, CAT_LABELS) {
 
   w <- cv_winners[cv_winners$join_number == s$join_number, ]
   if (nrow(w) == 0 || n < 32 + HOLD) return(out)
-  if (is.na(w$p[1])) return(out)      # benchmark winner: nothing to refit
   cn <- w                              # orders travel with the winner row
 
   ntr <- n - HOLD
+  ## Benchmark winners are backtestable without refitting anything: apply
+  ## the same rule to the training window. Skipping them left 45% of the
+  ## cohort unbacktested and pushed them all into EXCLUDE.
+  if (is.na(cn$p[1])) {
+    g <- if (grepl("^Flat", cn$spec[1])) 0 else stats::median(diff(s$y[1:ntr]))
+    pred_log <- s$y[ntr] + g * HOLD
+    act_log  <- s$y[n]
+    out$bt_ok <- TRUE
+    out$bt_err_log <- pred_log - act_log
+    out$bt_pct_err <- 100 * (exp(pred_log) / exp(act_log) - 1)
+    out$bt_cat_pred   <- as.character(cut(exp(pred_log), BREAKS, CAT_LABELS, right = FALSE))
+    out$bt_cat_actual <- as.character(cut(exp(act_log),  BREAKS, CAT_LABELS, right = FALSE))
+    out$bt_cat_hit    <- out$bt_cat_pred == out$bt_cat_actual
+    return(out)
+  }
+
   ytr <- ts(s$y[1:ntr], frequency = 4)
   X   <- s$xreg
   keep <- apply(X[1:ntr, , drop = FALSE], 2, function(z) length(unique(z)) > 1)
@@ -259,13 +274,11 @@ cat("Largest count error in any category:", max(abs(count_check$error)), "\n")
 ## systematically too optimistic and every bucket count leans large. That
 ## is a bias, not noise, and no amount of per-institution review finds it.
 ## ---------------------------------------------------------------------
-cat_now_map <- cu %>% select(join_number, asset_cat_now)
-
+## diag_cu already carries asset_cat_now; the starting category for the
+## backtest is the one held HOLD quarters ago, which comes from the panel.
 trans <- diag_cu %>% filter(bt_ok) %>%
-  left_join(cat_now_map, by = "join_number") %>%
-  mutate(start_i = match(asset_cat_now, CAT_LABELS),
-         pred_i  = match(bt_cat_pred, CAT_LABELS),
-         act_i   = match(bt_cat_actual, CAT_LABELS))
+  mutate(pred_i = match(bt_cat_pred, CAT_LABELS),
+         act_i  = match(bt_cat_actual, CAT_LABELS))
 
 ## The holdout starts HOLD quarters back, so the starting category is the
 ## one the institution was in then, not today.
