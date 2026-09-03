@@ -263,18 +263,27 @@ base <- base %>%
                            (log(up_edge) - log_now) / 20, Inf),
          g_cap_dn = ifelse(is.finite(down_edge) & down_edge > 0,
                            (log(down_edge) - log_now) / 20, -Inf),
-         g_cap_up = pmin(g_cap_up, G_MAX_PA / 4),
-         g_cap_dn = pmax(g_cap_dn, G_MIN_PA / 4),
-         ## R5: whichever of the three ceilings binds tightest wins
-         g_cap_up = pmin(g_cap_up, env_up),
-         g_cap_dn = pmax(g_cap_dn, env_dn))
+         ## Bucket-jump ceiling, kept SEPARATE so the audit can tell which
+         ## constraint actually bound. Folding the envelope in here made
+         ## fail_jump and fail_env fire on identical sets.
+         g_jump_up = pmin(g_cap_up, G_MAX_PA / 4),
+         g_jump_dn = pmax(g_cap_dn, G_MIN_PA / 4),
+         ## R5: the operative ceiling is whichever of the three binds tightest
+         g_cap_up = pmin(g_jump_up, env_up),
+         g_cap_dn = pmax(g_jump_dn, env_dn))
 
 ## ---------------------------------------------------------------------
 ## [12.5] The ladder
 ## ---------------------------------------------------------------------
 base <- base %>%
   mutate(
-    has_arima = !is.na(g_arima),
+    ## fit_one returns a projection for benchmark winners too, so a
+    ## non-missing g_arima does NOT mean an ARIMA was selected. Identify the
+    ## benchmark winners by their spec, or every branch below that tests
+    ## !has_arima becomes unreachable.
+    won_bench = !is.na(spec) &
+                grepl("^Simple growth rate \\(median|^Flat \\(last value", spec),
+    has_arima = !is.na(g_arima) & !won_bench,
     has_trend = !is.na(trend_p) & trend_p < TREND_P,
 
     ## R1 accuracy
@@ -282,7 +291,7 @@ base <- base %>%
     ## R2 band
     fail_band = has_arima & (g_arima * 4 > G_MAX_PA | g_arima * 4 < G_MIN_PA),
     ## R3 jump
-    fail_jump = has_arima & (g_arima > g_cap_up | g_arima < g_cap_dn),
+    fail_jump = has_arima & (g_arima > g_jump_up | g_arima < g_jump_dn),
     ## R4 flat while trending
     fail_flat = has_arima & abs(g_arima * 4) < FLAT_TOL & has_trend,
     ## R5 outside its own historical envelope
@@ -296,9 +305,9 @@ base <- base %>%
     flat_won = grepl("^Flat", spec),
 
     basis = case_when(
-      !has_arima & flat_won & !has_trend          ~ "Flat (won on CV, no trend)",
-      !has_arima & flat_won & has_trend           ~ "Simple growth rate (flat won but trend present)",
-      !has_arima & grepl("^Simple", spec)         ~ "Simple growth rate (won on CV)",
+      won_bench & flat_won & !has_trend           ~ "Flat (won on CV, no trend)",
+      won_bench & flat_won & has_trend            ~ "Simple growth rate (flat won but trend present)",
+      won_bench                                    ~ "Simple growth rate (won on CV)",
       !has_arima & !is.na(g_simple)               ~ "Simple growth rate (no ARIMA)",
       !has_arima                                   ~ "Peer growth (history too short)",
       fail_rmse                                    ~ "Simple growth rate (ARIMA unreliable)",
@@ -369,6 +378,9 @@ audit <- cu %>%
     failed_jump   = sum(fail_jump, na.rm = TRUE),
     failed_flat   = sum(fail_flat, na.rm = TRUE),
     failed_env    = sum(fail_env, na.rm = TRUE),
+    bound_by_env  = sum(env_up < g_jump_up, na.rm = TRUE),
+    bound_by_jump = sum(g_jump_up <= env_up, na.rm = TRUE),
+    bound_by_band = sum(abs(g_jump_up - G_MAX_PA / 4) < 1e-9, na.rm = TRUE),
     own_envelope  = sum(use_own_env),
     peer_envelope = sum(!use_own_env),
     max_growth_pa = max(growth_pa), min_growth_pa = min(growth_pa),
