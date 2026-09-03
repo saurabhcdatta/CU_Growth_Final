@@ -42,9 +42,18 @@ HOLD <- 8              # quarters held out for the backtest (2 years)
 ##   CORRECTED  the same model with the correction applied. This is what
 ##              you actually publish, and its bias should sit near zero.
 ## Do NOT feed the corrected figure back into BIAS_PA: that double-counts.
-BIAS_PA_APPLIED <- guardrails$BIAS_PA      # carried from script 12
+## Works whether you continued in script 12's session (BIAS_PA is already
+## in the environment) or started fresh from cohort_fits.rds (where it
+## lives inside the saved `guardrails` list).
+BIAS_PA_APPLIED <- if (exists("BIAS_PA")) BIAS_PA else
+                   if (exists("guardrails")) guardrails$BIAS_PA else 0
 BIAS_Q_APPLIED  <- log(1 + BIAS_PA_APPLIED) / 4
-BIAS_PA_APPLIED
+cat("Bias correction carried from script 12:",
+    round(100 * BIAS_PA_APPLIED, 2), "% a year\n")
+if (BIAS_PA_APPLIED == 0)
+  warning("No bias correction found. If script 12 applied one, load ",
+          "cohort_fits.rds or rerun 12 in this session, or the backtest ",
+          "will validate the uncorrected model.")
 JUMP_PCT <- 0.25       # quarter-on-quarter asset jump that looks like an event
 FROZEN_Q <- 4          # identical assets this many quarters = suspect
 
