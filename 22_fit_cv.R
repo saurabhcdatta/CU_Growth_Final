@@ -548,18 +548,23 @@ score_block <- function(P, dte) {
 ## [22.7] The run
 ## ---------------------------------------------------------------------
 t0 <- Sys.time()
-cv_rows <- list(); oof <- list(); buck <- list()
+
+## Accumulators are named *_acc, NOT the same as the bound data frames
+## below. A list accumulator sharing a name with the data frame saved to
+## the rds shadows it for the rest of the session, and script 23 then
+## fails with "no applicable method for inner_join applied to a list".
+cv_acc <- list(); oof_acc <- list(); buck_acc <- list()
 
 add_result <- function(P, dte, h, fi, sp) {
   s <- score_block(P, dte)
-  cv_rows[[length(cv_rows) + 1]] <<-
+  cv_acc[[length(cv_acc) + 1]] <<-
     cbind(data.frame(h = h, fold = fi, spec = sp), s$row)
-  buck[[length(buck) + 1]] <<-
+  buck_acc[[length(buck_acc) + 1]] <<-
     cbind(data.frame(h = h, fold = fi, spec = sp), s$buckets)
   ## Out-of-fold rows for EVERY spec. The winner is not known until [22.8],
   ## and storing only one leaves the calibration table describing a model
   ## that was not selected.
-  oof[[length(oof) + 1]] <<- data.frame(
+  oof_acc[[length(oof_acc) + 1]] <<- data.frame(
     h = h, fold = fi, spec = sp, join_number = dte$join_number,
     q_index = dte$q_index, cat_k = dte$cat_k, cat_act = dte$cat_f_act,
     p_assigned = P[cbind(seq_len(nrow(P)), dte$cat_f_act)],
@@ -625,10 +630,16 @@ for (h in H_SET) {
 
 difftime(Sys.time(), t0, units = "mins")
 
-cv      <- bind_rows(cv_rows)
-oof_df  <- bind_rows(oof)
-buck_df <- bind_rows(buck)
-nrow(cv); nrow(oof_df)
+cv      <- bind_rows(cv_acc)
+oof_df  <- bind_rows(oof_acc)
+buck_df <- bind_rows(buck_acc)
+
+## Session names identical to the names inside panel_cv.rds, so 23 and 25
+## behave the same whether they load the file or inherit the session.
+buck <- buck_df
+oof  <- oof_df
+
+nrow(cv); nrow(oof_df); nrow(buck_df)
 
 ## ---------------------------------------------------------------------
 ## [22.8] Read the result

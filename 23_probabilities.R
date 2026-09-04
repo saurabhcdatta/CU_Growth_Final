@@ -245,6 +245,19 @@ cat("Monotonicity ok.\n")
 ## It is OFF by default because it is a correction estimated on three
 ## folds; turn it on only if 25's backtest confirms the same bias.
 ## ---------------------------------------------------------------------
+## Guard. In a session that has just run 22, `buck` may still be the list
+## accumulator rather than the bound data frame. Same class of collision as
+## feat / feat_s at [22.0]; repair it rather than making the error a puzzle.
+if (!is.data.frame(buck)) {
+  if (exists("buck_df") && is.data.frame(buck_df)) {
+    message("[23.6] buck was a list -- using buck_df instead.")
+    buck <- buck_df
+  } else {
+    buck <- dplyr::bind_rows(buck)
+  }
+}
+stopifnot(is.data.frame(buck), is.data.frame(BEST_BY_H))
+
 calib_factors <- buck %>%
   inner_join(BEST_BY_H, by = c("h", "spec")) %>%
   group_by(h, cat) %>%
