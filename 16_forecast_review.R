@@ -72,11 +72,24 @@ rev <- cu %>%
     b_arima  = as.character(cut(a_arima,  BREAKS, CAT_LABELS, right = FALSE)),
     b_simple = as.character(cut(a_simple, BREAKS, CAT_LABELS, right = FALSE)),
     b_peer   = as.character(cut(a_peer,   BREAKS, CAT_LABELS, right = FALSE)),
+    ## Exact-bucket agreement is not independent of boundary proximity: near
+    ## an edge the three estimates scatter across it by construction, so
+    ## "0 of 3 agree" mostly restates what p_bucket already measures. Count
+    ## agreement WITHIN ONE CATEGORY instead, which asks the question that
+    ## matters -- do the methods broadly concur about where this institution
+    ## ends up -- rather than punishing every borderline case twice.
+    k5 = match(cat_5Yr, CAT_LABELS),
     n_agree = (!is.na(b_arima)  & b_arima  == cat_5Yr) +
               (!is.na(b_simple) & b_simple == cat_5Yr) +
               (!is.na(b_peer)   & b_peer   == cat_5Yr),
+    n_near  = (!is.na(b_arima)  & abs(match(b_arima,  CAT_LABELS) - k5) <= 1) +
+              (!is.na(b_simple) & abs(match(b_simple, CAT_LABELS) - k5) <= 1) +
+              (!is.na(b_peer)   & abs(match(b_peer,   CAT_LABELS) - k5) <= 1),
     n_avail = (!is.na(b_arima)) + (!is.na(b_simple)) + (!is.na(b_peer)),
-    agree_rate = ifelse(n_avail > 0, n_agree / n_avail, NA_real_))
+    agree_rate = ifelse(n_avail > 0, n_agree / n_avail, NA_real_),
+    near_rate  = ifelse(n_avail > 0, n_near  / n_avail, NA_real_))
+
+table(rev$n_agree, rev$n_near, dnn = c("exact", "within one"))
 
 table(rev$n_agree, useNA = "ifany")
 round(100 * mean(rev$agree_rate == 1, na.rm = TRUE), 1)   # % fully agreed
@@ -166,18 +179,26 @@ rev <- rev %>%
   left_join(diag_cu %>% select(join_number, triage, bt_cat_hit, bt_pct_err),
             by = "join_number") %>%
   mutate(
+    ## The bucket probability is the primary signal: it is grounded in the
+    ## institution's own out-of-sample error. Method disagreement is a
+    ## secondary flag -- it can pull a grade down a step, but it cannot on
+    ## its own send a well-determined assignment to the bottom.
     grade = case_when(
-      grepl("EXCLUDE", triage)                                  ~ "D",
-      p_bucket < 0.30 | agree_rate < 0.34                       ~ "D",
-      p_bucket < P_WEAK | dir_conflict | agree_rate < 0.67      ~ "C",
-      p_bucket < P_STRONG | triage == "REVIEW"                  ~ "B",
-      TRUE                                                       ~ "A"),
+      grepl("EXCLUDE", triage)                                   ~ "D",
+      p_bucket < 0.30                                            ~ "D",
+      near_rate < 0.34                                           ~ "D",
+      p_bucket < P_WEAK                                          ~ "C",
+      dir_conflict & near_rate < 1                               ~ "C",
+      near_rate < 0.67                                           ~ "C",
+      p_bucket < P_STRONG | triage == "REVIEW" | agree_rate < 1  ~ "B",
+      TRUE                                                        ~ "A"),
     review_note = trimws(paste0(
       ifelse(p_bucket < P_WEAK,
              sprintf("bucket only %.0f%% likely; ", 100 * p_bucket), ""),
       ifelse(d_edge < 1, sprintf("within %.1f SE of a boundary; ", d_edge), ""),
-      ifelse(agree_rate < 1 & !is.na(agree_rate),
-             sprintf("%d of %d methods agree; ", n_agree, n_avail), ""),
+      ifelse(near_rate < 1 & !is.na(near_rate),
+             sprintf("%d of %d methods land within one category; ",
+                     n_near, n_avail), ""),
       ifelse(dir_conflict, "forecast direction opposes last 3 years; ", ""),
       ifelse(!is.na(bt_cat_hit) & !bt_cat_hit, "backtest missed category; ", ""),
       ifelse(grepl("capped", basis), "growth capped by guardrail; ", ""),
@@ -222,6 +243,17 @@ cat("\nReview queue:", nrow(queue), "institutions",
     sprintf("(%.1f%% of the cohort)", 100 * nrow(queue) / nrow(rev)), "\n")
 cat("At 3 minutes each that is about",
     round(nrow(queue) * 3 / 60, 1), "hours of review.\n")
+
+## If the queue is still impractically large, the binding constraint is
+## reviewer time, not the grading. Take the top N by impact and say so --
+## a queue nobody works through is worth less than a short one that gets done.
+QUEUE_MAX <- 400
+if (nrow(queue) > QUEUE_MAX) {
+  cat("Queue exceeds", QUEUE_MAX, "- taking the top", QUEUE_MAX,
+      "by impact.\nThe rest keep their grades on the All Forecasts tab.\n")
+  queue <- head(queue, QUEUE_MAX)
+}
+nrow(queue)
 
 head(as.data.frame(queue %>% select(`CU Name`, `Category now`, `Category 5Yr`,
                                     `Bucket probability`, Grade, `Why flagged`)), 15)
