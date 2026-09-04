@@ -165,7 +165,7 @@ for (h in H_SET) {
 ## thresholds restores monotonicity and is the standard fix; it also cannot
 ## make the fit worse in the L2 sense.
 ## ---------------------------------------------------------------------
-dr_fit <- function(dtr, rhs, thresholds) {
+dr_fit <- function(dtr, rhs, thresholds, verbose = FALSE) {
   mf <- model.frame(as.formula(paste("~", rhs)), data = dtr,
                     na.action = na.pass)
   X  <- model.matrix(as.formula(paste("~", rhs)), mf)
@@ -180,15 +180,45 @@ dr_fit <- function(dtr, rhs, thresholds) {
 
   B <- matrix(NA_real_, nrow = ncol(X), ncol = length(thresholds),
               dimnames = list(colnames(X), NULL))
+  why <- character(length(thresholds))
+
   for (m in seq_along(thresholds)) {
     zz <- as.numeric(yv <= thresholds[m])
-    if (mean(zz) < 0.002 || mean(zz) > 0.998) next   # degenerate threshold
-    fit <- tryCatch(glm.fit(X, zz, family = binomial()),
-                    error = function(e) NULL, warning = function(w) NULL)
-    if (!is.null(fit) && all(is.finite(fit$coefficients)))
-      B[, m] <- fit$coefficients
+    if (mean(zz) < 0.002 || mean(zz) > 0.998) { why[m] <- "degenerate"; next }
+
+    ## WARNINGS ARE SUPPRESSED, NOT TREATED AS FAILURE.
+    ## "fitted probabilities numerically 0 or 1 occurred" is routine for a
+    ## binomial fit at an extreme threshold with category dummies in the
+    ## design, and the fit it accompanies is fine. Discarding on warning --
+    ## the pattern script 11 uses for Arima, where it IS right -- throws
+    ## away most of the grid here, leaves an all-NA CDF, and surfaces much
+    ## later as a NaN in the count reconciliation. Errors still fail.
+    fit <- tryCatch(suppressWarnings(glm.fit(X, zz, family = binomial())),
+                    error = function(e) NULL)
+
+    if (is.null(fit))              { why[m] <- "error";      next }
+    if (!isTRUE(fit$converged))    { why[m] <- "no converge"; next }
+    cf <- fit$coefficients
+    ## Aliased columns come back NA from glm.fit. Zero them: the column
+    ## contributes nothing, which is what aliasing means, rather than
+    ## poisoning the whole threshold.
+    cf[is.na(cf)] <- 0
+    if (!all(is.finite(cf)))       { why[m] <- "nonfinite";  next }
+    B[, m] <- cf
   }
-  list(B = B, cols = colnames(X), rhs = rhs, thresholds = thresholds)
+
+  n_ok <- sum(!apply(is.na(B), 2, all))
+  if (verbose || n_ok < 0.5 * length(thresholds))
+    cat(sprintf("   dr_fit: %d/%d thresholds fitted   %s\n",
+                n_ok, length(thresholds),
+                paste(names(sort(table(why[why != ""]), decreasing = TRUE)),
+                      collapse = ", ")))
+  if (n_ok == 0)
+    stop("dr_fit: no threshold could be fitted. Check the design matrix ",
+         "for this fold before going further.")
+
+  list(B = B, cols = colnames(X), rhs = rhs, thresholds = thresholds,
+       n_ok = n_ok, why = why)
 }
 
 dr_cdf_matrix <- function(fit, dte) {
@@ -201,18 +231,29 @@ dr_cdf_matrix <- function(fit, dte) {
   sh <- intersect(colnames(X), fit$cols)
   Xa[, sh] <- X[, sh]
 
+  ## A row with a missing covariate would produce an NA row here and the
+  ## NA then travels all the way to the count reconciliation. Nothing
+  ## should be missing after [21.7], so fail here where it is diagnosable.
+  if (anyNA(Xa))
+    stop("dr_cdf_matrix: ", sum(!complete.cases(Xa)),
+         " test rows have missing covariates.")
+
   eta <- Xa %*% fit$B
   Fm  <- 1 / (1 + exp(-eta))
 
   ## Thresholds where the logit could not be fitted: carry the neighbour
   bad <- apply(is.na(Fm), 2, all)
-  if (any(bad) && !all(bad)) {
+  if (all(bad))
+    stop("dr_cdf_matrix: every threshold is unfitted for this fold.")
+  if (any(bad)) {
     good <- which(!bad)
     for (m in which(bad)) Fm[, m] <- Fm[, good[which.min(abs(good - m))]]
   }
   ## Monotone rearrangement across thresholds
   Fm <- t(apply(Fm, 1, cummax))
-  pmin(pmax(Fm, 0), 1)
+  Fm <- pmin(pmax(Fm, 0), 1)
+  stopifnot(!anyNA(Fm))
+  Fm
 }
 
 ## Anchor the grid so interpolation never has to extrapolate
@@ -246,8 +287,18 @@ bucket_probs <- function(Fm, C, y_raw) {
     Fprev <- Fk
   }
   P[, N_CAT] <- 1 - Fprev
+
+  ## Loud rather than silent: an NA here means the CDF grid had a hole, and
+  ## it would otherwise show up as a NaN in the reconciliation assertion
+  ## three functions later with nothing to point at.
+  if (anyNA(P))
+    stop("bucket_probs: ", sum(!complete.cases(P)),
+         " rows produced NA probabilities.")
+
   P <- pmax(P, P_FLOOR)
-  P / rowSums(P)
+  P <- P / rowSums(P)
+  stopifnot(all(is.finite(P)))
+  P
 }
 
 ## ---------------------------------------------------------------------
@@ -302,6 +353,8 @@ bench_probs <- function(kind, dtr, dte) {
     }
   }
 
+  if (anyNA(P))
+    stop("bench_probs (", kind, "): NA probabilities produced.")
   P <- pmax(P, P_FLOOR)
   P / rowSums(P)
 }
@@ -329,9 +382,15 @@ score_block <- function(P, dte) {
   soft <- colSums(P)
   hard <- as.numeric(table(factor(k_act, levels = 1:N_CAT)))
   ## Closed-cohort reconciliation: rows sum to one, so the soft counts sum
-  ## to the number of institutions. If this ever fails, bucket_probs has
-  ## stopped normalising and every count downstream is wrong.
-  stopifnot(abs(sum(soft) - nrow(P)) < 1e-6)
+  ## to the number of institutions. Report the actual discrepancy -- a bare
+  ## stopifnot cannot distinguish a real mismatch from an NA, and the two
+  ## have completely different causes.
+  if (!is.finite(sum(soft)))
+    stop("score_block: soft counts are not finite -- ",
+         sum(!complete.cases(P)), " NA rows in P.")
+  if (abs(sum(soft) - nrow(P)) > 1e-6)
+    stop(sprintf("score_block: soft counts sum to %.6f, expected %d.",
+                 sum(soft), nrow(P)))
   ## Direction: the frozen-cohort track's known weak point
   k_now <- dte$cat_k
   p_dn <- sum(rowSums(P * outer(k_now, seq_len(N_CAT), ">")))
