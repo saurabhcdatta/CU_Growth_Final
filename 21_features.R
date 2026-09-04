@@ -34,6 +34,14 @@
 ## statistic, nothing computed from the outcome window. Anything of that
 ## kind leaks and the cross-validation in 22 will not catch it.
 ##
+## One deliberate exception, flagged so it is not mistaken for a leak: the
+## winsorisation caps at [21.1b] are full-sample quantiles of the
+## COVARIATES, as are the scaling constants at [21.7]. Both are properties
+## of the regressor distribution, not of the outcome, and both are applied
+## identically to every fold and to the forecast rows. Refitting them per
+## fold would change nothing material and would make 23 harder to keep
+## consistent.
+##
 ## Run block by block in RStudio.
 ## =====================================================================
 
@@ -110,6 +118,39 @@ feat <- panel %>%
 
 nrow(feat)
 summary(feat$g20 * 4)          # annualised, sanity: mostly 0 to 0.10
+summary(feat$vol)
+
+## ---------------------------------------------------------------------
+## [21.1b] Winsorise the heavy-tailed COVARIATES
+##
+## The raw trailing-growth and volatility columns carry a handful of
+## enormous points: g20 reaches +6.5 and -3.3 annualised against a scaled
+## SD of about 0.02 per quarter, which is 80 standard deviations, and vol
+## reaches 4.58 against a median of 0.028. These are real -- a small credit
+## union doubling, an acquisition jump -- but in script 22 they enter
+## twenty-five separate logits, and a few 80-SD points there produce
+## unstable coefficients and possible separation at the extreme thresholds.
+##
+## THE OUTCOME IS NEVER TOUCHED. dy_h defines where each institution sits
+## relative to the category edges, so its tails are the signal, not noise.
+## Only the regressors are capped, and only at the half-percent tails.
+## ---------------------------------------------------------------------
+WINS <- c("g4", "g12", "g20", "vol")
+
+wq <- lapply(feat[WINS], quantile, c(0.005, 0.995), na.rm = TRUE)
+round(do.call(rbind, wq), 4)
+
+## What is being clipped, and how much of it
+for (v in WINS)
+  cat(sprintf("%-4s  clipped %5d rows (%.2f%%)   range %.3f to %.3f\n",
+              v, sum(feat[[v]] < wq[[v]][1] | feat[[v]] > wq[[v]][2], na.rm = TRUE),
+              100 * mean(feat[[v]] < wq[[v]][1] | feat[[v]] > wq[[v]][2], na.rm = TRUE),
+              min(feat[[v]], na.rm = TRUE), max(feat[[v]], na.rm = TRUE)))
+
+for (v in WINS) feat[[v]] <- pmin(pmax(feat[[v]], wq[[v]][1]), wq[[v]][2])
+
+## After: g20 annualised should now sit in a sane band, vol well under 1
+summary(feat$g20 * 4)
 summary(feat$vol)
 
 ## ---------------------------------------------------------------------
@@ -343,5 +384,6 @@ colSums(is.na(fc_rows_s[c(FEAT_NUM, FEAT_FAC, "pos_in_cat", "y_raw")]))
 saveRDS(list(feat = feat_s, fc_rows = fc_rows_s, short_cu = short_cu,
              H_SET = H_SET, FEAT_NUM = FEAT_NUM, FEAT_FAC = FEAT_FAC,
              FEAT_FWD = FEAT_FWD, SCALE_MU = SCALE_MU, SCALE_SD = SCALE_SD,
-             apply_scale = apply_scale, MIN_HIST = MIN_HIST, CAP_D = CAP_D),
+             apply_scale = apply_scale, MIN_HIST = MIN_HIST, CAP_D = CAP_D,
+             WINS = WINS, WINS_Q = wq),
         file = "panel_features.rds")
