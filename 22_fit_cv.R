@@ -91,9 +91,10 @@ P_FLOOR    <- 1e-6
 ## thresholds are where binomial separation lives: within a thin category
 ## cell, every observation can fall on one side, the likelihood has no
 ## interior maximum, and IRLS runs to its iteration cap for nothing.
-THRESH_LO  <- 0.03
-THRESH_HI  <- 0.97
+THRESH_LO  <- 0.01
+THRESH_HI  <- 0.99
 GLM_MAXIT  <- 60
+N_ZGRID    <- 10      # extra thresholds placed where the category edges are
 
 ## Training-set thinning. With h=20 two origins one quarter apart share 19
 ## of 20 quarters of outcome window, so consecutive origins are very nearly
@@ -102,7 +103,7 @@ GLM_MAXIT  <- 60
 ## left -- 40 parameters do not need 300,000 rows, and the estimates are
 ## indistinguishable well below that.
 TRAIN_ORIGIN_STEP <- 2
-MAX_TRAIN         <- 120000
+MAX_TRAIN         <- 80000
 set.seed(20260904)
 
 ## ---------------------------------------------------------------------
@@ -315,22 +316,56 @@ dr_cdf_matrix <- function(fit, dte) {
   Fm
 }
 
-## Anchor the grid so interpolation never has to extrapolate
-augment_grid <- function(Fm, thresholds, lo, hi) {
-  list(C = c(lo, thresholds, hi),
-       F = cbind(0, Fm, 1))
+## Threshold grid. This is the part that matters most, and the obvious
+## choice is the wrong one.
+##
+## The instinct is to place the grid at quantiles of dy. But the model is
+## never asked for the CDF at a typical growth rate. It is asked for the
+## CDF at each institution's own BOUNDARY-CROSSING POINT,
+## z = log(edge) - log(assets). [21.2] shows where those sit: median d_up
+## runs 0.36 to 1.71 by category and median d_dn 0.17 to 4.00, while the
+## 3rd-to-97th percentile of five-year dy spans only about -0.20 to +0.65.
+## A dy-quantile grid therefore misses nearly every crossing point, and
+## every bucket probability comes from extrapolation rather than from a
+## fitted logit. That is what produced down_ratio near 28.
+##
+## So: quantiles of dy for the body, PLUS points at the quantiles of the
+## crossing distances that will actually be evaluated, clipped to the
+## support of dy. Thresholds still too extreme to fit are dropped by the
+## degenerate guard in dr_fit.
+make_grid <- function(dtr, n_thresh = N_THRESH, n_z = N_ZGRID) {
+  thr_q <- quantile(dtr$dy, seq(THRESH_LO, THRESH_HI, length.out = n_thresh))
+
+  z_need <- as.vector(outer(LOG_EDGE[2:N_CAT], dtr$y_raw, "-"))
+  z_need <- z_need[is.finite(z_need)]
+  zq     <- quantile(z_need, seq(0.05, 0.95, length.out = n_z))
+
+  supp <- quantile(dtr$dy, c(0.004, 0.996))
+  zq   <- zq[zq > supp[1] & zq < supp[2]]
+
+  sort(unique(c(thr_q, zq)))
 }
 
-## CDF evaluated at row-specific points, vectorised over rows
+## CDF evaluated at row-specific points, vectorised over rows.
+##
+## Interpolated on the LOGIT scale, extrapolated beyond the grid from the
+## slope of the two nearest points. The previous version anchored the grid
+## with F=0 and F=1 at arbitrary far-out values and interpolated linearly
+## in probability, which ran a straight line across the entire tail and
+## grossly overstated the chance of a crossing. A logistic tail is both
+## better behaved and closer to what the fitted logits actually imply.
 cdf_at <- function(Fm, C, z) {
-  n <- length(z)
-  j  <- findInterval(z, C, rightmost.closed = TRUE, all.inside = TRUE)
-  wl <- (C[j + 1] - z) / (C[j + 1] - C[j])
-  wl <- pmin(pmax(wl, 0), 1)
-  out <- wl * Fm[cbind(seq_len(n), j)] + (1 - wl) * Fm[cbind(seq_len(n), j + 1)]
-  out[z <= C[1]] <- 0
-  out[z >= C[length(C)]] <- 1
-  out
+  n <- length(z); M <- length(C)
+  stopifnot(M >= 2)
+  L <- qlogis(pmin(pmax(Fm, 1e-6), 1 - 1e-6))
+
+  j  <- findInterval(z, C)
+  jl <- pmin(pmax(j, 1), M - 1)
+  jh <- jl + 1
+  w  <- (z - C[jl]) / (C[jh] - C[jl])      # outside the grid: w < 0 or w > 1
+
+  out <- (1 - w) * L[cbind(seq_len(n), jl)] + w * L[cbind(seq_len(n), jh)]
+  plogis(pmin(pmax(out, -25), 25))
 }
 
 ## Bucket probabilities from a CDF grid. The edges are the known constants.
@@ -520,24 +555,20 @@ for (h in H_SET) {
 
     if (nrow(dtr) < 5000 || nrow(dte) < 200) next
 
-    thr <- unique(quantile(dtr$dy,
-                           seq(THRESH_LO, THRESH_HI, length.out = N_THRESH)))
-    lo  <- min(dtr$dy) - 0.5; hi <- max(dtr$dy) + 0.5
+    thr <- make_grid(dtr)
 
     for (sp in names(spec_list)) {
       fit <- dr_fit(dtr, rhs_for(sp, h), thr)
       Fm  <- dr_cdf_matrix(fit, dte)
-      ag  <- augment_grid(Fm, thr, lo, hi)
-      P   <- bucket_probs(ag$F, ag$C, dte$y_raw)
+      P   <- bucket_probs(Fm, thr, dte$y_raw)
       s   <- score_block(P, dte)
       cv_rows[[length(cv_rows) + 1]] <-
         cbind(data.frame(h = h, fold = fi, spec = sp), s)
-      if (sp == "dr_full")
-        oof[[length(oof) + 1]] <- data.frame(
-          h = h, fold = fi, join_number = dte$join_number,
-          q_index = dte$q_index, cat_k = dte$cat_k,
-          cat_act = dte$cat_f_act, p_assigned = P[cbind(1:nrow(P), dte$cat_f_act)],
-          p_max = apply(P, 1, max), k_max = max.col(P))
+      oof[[length(oof) + 1]] <- data.frame(
+        h = h, fold = fi, spec = sp, join_number = dte$join_number,
+        q_index = dte$q_index, cat_k = dte$cat_k,
+        cat_act = dte$cat_f_act, p_assigned = P[cbind(1:nrow(P), dte$cat_f_act)],
+        p_max = apply(P, 1, max), k_max = max.col(P))
     }
 
     for (bk in c("emp_cell", "emp_all", "norm_ls")) {
@@ -545,10 +576,19 @@ for (h in H_SET) {
       s <- score_block(P, dte)
       cv_rows[[length(cv_rows) + 1]] <-
         cbind(data.frame(h = h, fold = fi, spec = bk), s)
+      ## Out-of-fold rows for EVERY spec, not just dr_full. The winner is
+      ## not known until [22.7], and on the first run it was a benchmark --
+      ## storing only dr_full left the calibration table at [22.9]
+      ## describing a model that had not been selected.
+      oof[[length(oof) + 1]] <- data.frame(
+        h = h, fold = fi, spec = bk, join_number = dte$join_number,
+        q_index = dte$q_index, cat_k = dte$cat_k,
+        cat_act = dte$cat_f_act, p_assigned = P[cbind(1:nrow(P), dte$cat_f_act)],
+        p_max = apply(P, 1, max), k_max = max.col(P))
     }
 
-    cat(sprintf("h=%2d fold %d  train %6d of %6d  test %5d   (%s elapsed)\n",
-                h, fi, nrow(dtr), n_pre, nrow(dte),
+    cat(sprintf("h=%2d fold %d  train %6d of %6d  test %5d  thr %2d  (%s elapsed)\n",
+                h, fi, nrow(dtr), n_pre, nrow(dte), length(thr),
                 format(round(difftime(Sys.time(), t0, units = "mins"), 1))))
   }
 }
@@ -623,10 +663,13 @@ if (!FIT_EXIT) {
   exit_cv <- NULL
 }
 
-if (FIT_EXIT) {
+## Defined OUTSIDE the FIT_EXIT gate. The saveRDS at the end of the script
+## stores rhs_exit either way, and a name that exists only on one branch
+## fails the save after the whole run has completed.
 rhs_exit <- paste("y + d_dn + g12 + g20 + vol + hist_len + cat_f",
                   "+ region + cu_type + acq_cum + shock_now + shock_trail")
 
+if (FIT_EXIT) {
 ex_rows <- list()
 for (h in H_SET) {
   us <- feat[[paste0("usable_h", h)]]
@@ -677,7 +720,7 @@ nrow(oof_df)
 ## how often that category was the one that happened. Binning on
 ## p_assigned instead would condition on the outcome and always look good.
 oof_df %>%
-  filter(h == 20) %>%
+  filter(h == 20, spec == BEST_SPEC) %>%
   mutate(bin = cut(p_max, seq(0, 1, 0.1), include.lowest = TRUE)) %>%
   group_by(bin) %>%
   summarise(n = n(), mean_p = round(mean(p_max), 3),
@@ -686,18 +729,19 @@ oof_df %>%
 
 ## Hit rate of the modal category, by horizon -- comparable to the 95.2%
 ## two-year category hit rate in section 6 of the handoff.
-oof_df %>% group_by(h) %>%
+oof_df %>% group_by(h, spec) %>%
   summarise(hit_modal = round(100 * mean(k_max == cat_act), 1),
             mean_pmax = round(mean(p_max), 3), .groups = "drop") %>%
-  as.data.frame()
+  arrange(h, desc(hit_modal)) %>% as.data.frame()
 
 saveRDS(list(cv = cv, cv_summary = cv_summary, exit_cv = exit_cv,
              CLOSED_COHORT = CLOSED_COHORT, FIT_EXIT = FIT_EXIT,
              oof = oof_df, BEST_SPEC = BEST_SPEC, spec_list = spec_list,
              rhs_for = rhs_for, rhs_full = rhs_full, rhs_exit = rhs_exit,
              dr_fit = dr_fit, dr_cdf_matrix = dr_cdf_matrix,
-             augment_grid = augment_grid, cdf_at = cdf_at,
+             make_grid = make_grid, cdf_at = cdf_at,
              bucket_probs = bucket_probs, bench_probs = bench_probs,
              rps = rps, make_folds = make_folds,
-             N_THRESH = N_THRESH, P_FLOOR = P_FLOOR),
+             N_THRESH = N_THRESH, N_ZGRID = N_ZGRID, P_FLOOR = P_FLOOR,
+             THRESH_LO = THRESH_LO, THRESH_HI = THRESH_HI),
         file = "panel_cv.rds")
