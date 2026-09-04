@@ -69,7 +69,18 @@ SCENARIO <- "baseline"          # "baseline" | "shock" | "calm"
 ## Optional bucket calibration -- see [23.6]. Off by default.
 BUCKET_CALIB <- FALSE
 
-MIN_POOL <- 150        # matches MIN_WIN in 22; below this, widen the pool
+## Minimum pool size before falling back to a wider one. Lowered from 150
+## after the first run of [23.3]: at 150, A7 fell back to the
+## three-category window at h=12 and h=20 and drew on 15,515 and 12,250
+## rows -- more than A6 has of its own. A7's forecast was therefore A6's
+## growth distribution, and it showed: p_down at five years came out at
+## 0.8% when 5 of 19 A7 origins in the panel actually moved down.
+##
+## 60 is low for an empirical CDF, but the alternative is not "a noisier
+## A7 estimate", it is "an A7 estimate of something else". A thin pool of
+## the right institutions beats a thick pool of the wrong ones. The
+## printout below shows which categories used their own data.
+MIN_POOL <- 60
 P_FLOOR  <- 1e-6
 
 cat("Spec:", SPEC, " weighted:", WEIGHTED, " scenario:", SCENARIO, "\n")
@@ -148,35 +159,63 @@ build_pools <- function(h) {
   }
 
   pools <- list()
+  src   <- character(N_CAT)
   for (k in seq_len(N_CAT)) {
     idx <- which(d_h$cat_k == k)
-    ## Thin category (A7 always, sometimes A5): widen to the three-category
-    ## window rather than falling to the pooled distribution, which would
-    ## hand a $10B credit union the growth distribution of a $5M one.
-    if (length(idx) < MIN_POOL) idx <- which(abs(d_h$cat_k - k) <= 1)
-    if (length(idx) < MIN_POOL) idx <- seq_len(nrow(d_h))
+    src[k] <- "own"
+    ## Widen to the three-category window rather than falling to the pooled
+    ## distribution, which would hand a $10B credit union the growth
+    ## distribution of a $5M one. Which categories take this branch is
+    ## printed below -- it changes what the forecast means for them.
+    if (length(idx) < MIN_POOL) {
+      idx <- which(abs(d_h$cat_k - k) <= 1); src[k] <- "window"
+    }
+    if (length(idx) < MIN_POOL) {
+      idx <- seq_len(nrow(d_h)); src[k] <- "pooled"
+    }
     pools[[as.character(k)]] <- make_pool(d_h$dy[idx], w[idx])
   }
   attr(pools, "n_origins") <- nrow(d_h)
+  attr(pools, "source")    <- src
   pools
 }
 
 POOLS <- lapply(H_SET, build_pools)
 names(POOLS) <- as.character(H_SET)
 
-## Pool sizes and shape. Check A7 -- it is the category that falls back.
+## Pool sizes, source and shape. `src` is the thing to read first: any
+## category showing "window" is being forecast with its neighbours' growth
+## distribution, not its own, and its numbers should be read accordingly.
+## p_neg is the share of the pool with negative growth -- the raw material
+## for every down-move the method can produce.
 for (h in H_SET) {
-  cat("\nh =", h, "  training rows:", attr(POOLS[[as.character(h)]],
-                                           "n_origins"), "\n")
+  pl <- POOLS[[as.character(h)]]
+  cat("\nh =", h, "  training rows:", attr(pl, "n_origins"), "\n")
   print(data.frame(
-    cat = CAT_LABELS,
-    n   = sapply(POOLS[[as.character(h)]], function(p) p$n),
-    p10 = round(100 * (exp(sapply(POOLS[[as.character(h)]], pool_q, 0.10) *
-                           4 / h) - 1), 1),
-    med = round(100 * (exp(sapply(POOLS[[as.character(h)]], pool_q, 0.50) *
-                           4 / h) - 1), 1),
-    p90 = round(100 * (exp(sapply(POOLS[[as.character(h)]], pool_q, 0.90) *
-                           4 / h) - 1), 1)))
+    cat   = CAT_LABELS,
+    src   = attr(pl, "source"),
+    n     = sapply(pl, function(p) p$n),
+    p_neg = round(100 * sapply(pl, function(p) mean(p$dy < 0)), 1),
+    p10   = round(100 * (exp(sapply(pl, pool_q, 0.10) * 4 / h) - 1), 1),
+    med   = round(100 * (exp(sapply(pl, pool_q, 0.50) * 4 / h) - 1), 1),
+    p90   = round(100 * (exp(sapply(pl, pool_q, 0.90) * 4 / h) - 1), 1)))
+}
+
+## A7 specifically: its own data against the window it would otherwise
+## borrow. If these two rows look alike the fallback was harmless; if they
+## do not, MIN_POOL is doing real work.
+for (h in H_SET) {
+  us  <- feat[[paste0("usable_surv_h", h)]]
+  d_h <- feat[us, ]; d_h$dy <- d_h[[paste0("dy_h", h)]]
+  d_h <- d_h[!is.na(d_h$dy), ]
+  own <- d_h$dy[d_h$cat_k == 7]
+  win <- d_h$dy[abs(d_h$cat_k - 7) <= 1]
+  cat(sprintf("h=%2d  A7 own  n=%5d  p_neg %4.1f%%  med %5.1f%%\n",
+              h, length(own), 100 * mean(own < 0),
+              100 * (exp(median(own) * 4 / h) - 1)))
+  cat(sprintf("      A6+A7   n=%5d  p_neg %4.1f%%  med %5.1f%%\n",
+              length(win), 100 * mean(win < 0),
+              100 * (exp(median(win) * 4 / h) - 1)))
 }
 
 ## ---------------------------------------------------------------------
@@ -391,6 +430,15 @@ for (h in H_SET) {
   print(round(100 * TRANS[[as.character(h)]], 1))
 }
 
+## A5 at five years is close to a coin flip -- roughly half stay, half move
+## up to A6. That is arithmetic rather than instability, and it should be
+## explained on the Method tab before someone reads it as a model failure:
+## the $500M-$1B band is 0.69 log units wide, median A5 growth compounds to
+## about half that over twenty quarters, so about half the band crosses.
+cat(sprintf("\nA5 band width %.2f log units; median A5 5y growth %.2f log units\n",
+            LOG_EDGE[6] - LOG_EDGE[5],
+            pool_q(POOLS[["20"]][["5"]], 0.50)))
+
 ## Region x charter counts, for the six regional tabs. A plain loop:
 ## six cells, three horizons, seven categories.
 cell_rows <- list()
@@ -404,16 +452,20 @@ for (h in H_SET) {
       h = h, region = cells$region[i], cu_type = cells$cu_type[i],
       n_now = sum(sel), cat = CAT_LABELS,
       now = as.numeric(table(factor(fc$cat_k[sel], levels = 1:N_CAT))),
-      fcst = round(colSums(P[sel, , drop = FALSE]), 1))
+      ## Keep the unrounded value for the tie-out; round only for display.
+      ## Summing seven values each rounded to 0.1 can drift by up to 0.35,
+      ## which is what made the first run report six false failures here.
+      fcst_exact = colSums(P[sel, , drop = FALSE]))
   }
 }
-cell_counts <- bind_rows(cell_rows)
+cell_counts <- bind_rows(cell_rows) %>% mutate(fcst = round(fcst_exact, 1))
 
-## Each cell must still tie to its own institution count
+## Each cell must still tie to its own institution count, EXACTLY, on the
+## unrounded probabilities.
 cell_counts %>% group_by(h, region, cu_type) %>%
-  summarise(n_now = first(n_now), fcst_total = round(sum(fcst), 1),
+  summarise(n_now = first(n_now), fcst_total = sum(fcst_exact),
             .groups = "drop") %>%
-  filter(abs(n_now - fcst_total) > 0.05) %>% as.data.frame()   # expect none
+  filter(abs(n_now - fcst_total) > 1e-6) %>% as.data.frame()   # expect none
 
 cell_counts %>% filter(h == 20) %>%
   select(region, cu_type, cat, now, fcst) %>%
@@ -430,6 +482,52 @@ cat("\nFive-year change by category, this method:\n")
 print(counts %>% transmute(cat, now, h20, chg = round(h20 - now, 1),
                            pct = round(100 * (h20 - now) / pmax(now, 1), 1)) %>%
         as.data.frame())
+
+## ---- nominal drift: the single biggest driver of these numbers --------
+##
+## Every category below $100M shrinks and everything above grows. The
+## mechanism is not a model result, it is arithmetic: the pool medians
+## above run roughly 1% to 8% a year, the category edges are fixed nominal
+## dollars, and the industry climbs the ladder past them. The frozen-cohort
+## track has exactly the same property.
+##
+## This has to go on the Method tab. "$10B credit unions grow 263% in five
+## years" is the sentence the field team will react to, and most of it is
+## the denominator rather than the numerator.
+cat("\nNominal drift check\n")
+cat(sprintf("  E[up]   %7.1f\n  E[down] %7.1f\n  ratio   %7.1f : 1\n",
+            sum(inst$p_up_h20), sum(inst$p_down_h20),
+            sum(inst$p_up_h20) / pmax(sum(inst$p_down_h20), 1e-9)))
+
+## Real-dollar sensitivity. Reruns the same method with the edges inflated
+## at CPI_ASSUMPTION a year, which is what the counts would look like if
+## the thresholds kept pace with prices. The gap between the two columns is
+## how much of the published movement is nominal.
+CPI_ASSUMPTION <- 0.025
+
+real_counts <- lapply(H_SET, function(h) {
+  infl <- (1 + CPI_ASSUMPTION) ^ (h / 4)
+  LE   <- LOG_EDGE + log(infl)                 # edges move, assets do not
+  LE[1] <- -Inf; LE[N_CAT + 1] <- Inf
+  old_edge <- LOG_EDGE
+  assign("LOG_EDGE", LE, envir = .GlobalEnv)
+  P <- emp_bucket_probs(POOLS[[as.character(h)]], fc$cat_k, fc$y_raw)
+  assign("LOG_EDGE", old_edge, envir = .GlobalEnv)
+  colSums(P)
+})
+names(real_counts) <- paste0("real_h", H_SET)
+
+nominal_vs_real <- data.frame(
+  cat = CAT_LABELS, now = counts$now,
+  nominal_h20 = round(counts$h20, 1),
+  real_h20    = round(real_counts$real_h20, 1)) %>%
+  mutate(nominal_chg = round(nominal_h20 - now, 1),
+         real_chg    = round(real_h20 - now, 1),
+         of_which_nominal = round(nominal_h20 - real_h20, 1))
+
+cat("\nNominal vs inflation-indexed edges at", 100 * CPI_ASSUMPTION,
+    "% a year:\n")
+print(as.data.frame(nominal_vs_real))
 
 cat("\nA7 check. Out of fold this category ran +28% to +55% high, and the\n",
     "frozen-cohort track runs +54%. It is 13 institutions and there is no\n",
@@ -453,6 +551,8 @@ inst %>%
 saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              TRANS = TRANS, counts = counts, cell_counts = cell_counts,
              calib_factors = calib_factors,
+             nominal_vs_real = nominal_vs_real, real_counts = real_counts,
+             CPI_ASSUMPTION = CPI_ASSUMPTION,
              SPEC = SPEC, WEIGHTED = WEIGHTED, HALFLIFE = HALFLIFE,
              SCENARIO = SCENARIO, BUCKET_CALIB = BUCKET_CALIB,
              MIN_POOL = MIN_POOL, P_FLOOR = P_FLOOR,
