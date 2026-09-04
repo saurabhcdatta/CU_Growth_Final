@@ -373,15 +373,27 @@ apply_scale <- function(d) {
   d
 }
 
-feat_s    <- apply_scale(feat)
-fc_rows_s <- apply_scale(fc_rows)
+## Assigned IN PLACE, not to feat_s / fc_rows_s. The global names must
+## match the names script 22 reads out of the rds, or a session that has
+## just run 21 will hand 22 the unscaled frame -- which has no cat_f and
+## no y_raw, and fails inside model.matrix with an unhelpful message.
+## The guard below catches an accidental second application, which would
+## silently standardise already-standardised columns.
+stopifnot(!"y_raw" %in% names(feat))
+
+feat    <- apply_scale(feat)
+fc_rows <- apply_scale(fc_rows)
 
 ## Missingness check -- glm drops incomplete rows silently and the fold
 ## sizes then stop matching, which is very hard to spot later.
-colSums(is.na(feat_s[c(FEAT_NUM, FEAT_FAC, "pos_in_cat", "y_raw")]))
-colSums(is.na(fc_rows_s[c(FEAT_NUM, FEAT_FAC, "pos_in_cat", "y_raw")]))
+colSums(is.na(feat[c(FEAT_NUM, FEAT_FAC, "pos_in_cat", "y_raw")]))
+colSums(is.na(fc_rows[c(FEAT_NUM, FEAT_FAC, "pos_in_cat", "y_raw")]))
 
-saveRDS(list(feat = feat_s, fc_rows = fc_rows_s, short_cu = short_cu,
+## Everything 22 needs on a row must be here
+stopifnot(all(c("cat_f", "y_raw", "cat_k", "pos_in_cat") %in% names(feat)),
+          all(c("cat_f", "y_raw", "cat_k", "pos_in_cat") %in% names(fc_rows)))
+
+saveRDS(list(feat = feat, fc_rows = fc_rows, short_cu = short_cu,
              H_SET = H_SET, FEAT_NUM = FEAT_NUM, FEAT_FAC = FEAT_FAC,
              FEAT_FWD = FEAT_FWD, SCALE_MU = SCALE_MU, SCALE_SD = SCALE_SD,
              apply_scale = apply_scale, MIN_HIST = MIN_HIST, CAP_D = CAP_D,

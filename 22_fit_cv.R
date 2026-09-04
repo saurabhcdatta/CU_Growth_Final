@@ -48,6 +48,34 @@ setwd("S:/Projects/Credit_Union_Growth_Forecast/Data")
 ## prep <- readRDS("panel_prep.rds");     list2env(prep, .GlobalEnv)
 ## fts  <- readRDS("panel_features.rds"); list2env(fts,  .GlobalEnv)
 
+## ---------------------------------------------------------------------
+## [22.0] Input guard
+##
+## 22 reads `feat` and `fc_rows`, which must be the SCALED frames from
+## [21.7]. Running 21 and 22 back to back in one session can leave the
+## unscaled `feat` in the global environment, and the failure then surfaces
+## deep inside model.matrix as "object 'cat_f' not found". Repair it here
+## rather than making that error a puzzle every time.
+## ---------------------------------------------------------------------
+if (!"cat_f" %in% names(feat) || !"y_raw" %in% names(feat)) {
+  if (exists("feat_s")) {
+    message("[22.0] feat was unscaled -- using feat_s / fc_rows_s instead.")
+    feat <- feat_s; fc_rows <- fc_rows_s
+  } else if (exists("apply_scale")) {
+    message("[22.0] feat was unscaled -- applying apply_scale().")
+    feat <- apply_scale(feat); fc_rows <- apply_scale(fc_rows)
+  } else {
+    stop("[22.0] feat is unscaled and neither feat_s nor apply_scale exists. ",
+         "Re-load panel_features.rds.")
+  }
+}
+
+stopifnot(all(c("cat_f", "y_raw", "cat_k", "pos_in_cat") %in% names(feat)),
+          all(c("cat_f", "y_raw", "cat_k", "pos_in_cat") %in% names(fc_rows)),
+          all(paste0("usable_surv_h", H_SET) %in% names(feat)))
+
+cat("[22.0] ok --", nrow(feat), "origin rows,", nrow(fc_rows), "forecast rows\n")
+
 ## Follows script 20. TRUE = fixed total, no exit column published.
 CLOSED_COHORT <- if (exists("CLOSED_COHORT")) CLOSED_COHORT else TRUE
 FIT_EXIT      <- !CLOSED_COHORT      # [22.8] runs only if exits are wanted
@@ -348,7 +376,7 @@ for (h in H_SET) {
     lo  <- min(dtr$dy) - 0.5; hi <- max(dtr$dy) + 0.5
 
     for (sp in names(spec_list)) {
-      fit <- dr_fit(dtr %>% mutate(dy = dy), rhs_for(sp, h), thr)
+      fit <- dr_fit(dtr, rhs_for(sp, h), thr)
       Fm  <- dr_cdf_matrix(fit, dte)
       ag  <- augment_grid(Fm, thr, lo, hi)
       P   <- bucket_probs(ag$F, ag$C, dte$y_raw)
