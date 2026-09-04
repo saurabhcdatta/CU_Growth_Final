@@ -87,6 +87,24 @@ FOLD_WIDTH <- 4       # test origins per fold, in quarters
 FOLD_GAP   <- 8       # spacing between fold test windows
 P_FLOOR    <- 1e-6
 
+## Threshold grid range. Pulled in from 0.02/0.98 because the extreme
+## thresholds are where binomial separation lives: within a thin category
+## cell, every observation can fall on one side, the likelihood has no
+## interior maximum, and IRLS runs to its iteration cap for nothing.
+THRESH_LO  <- 0.03
+THRESH_HI  <- 0.97
+GLM_MAXIT  <- 60
+
+## Training-set thinning. With h=20 two origins one quarter apart share 19
+## of 20 quarters of outcome window, so consecutive origins are very nearly
+## duplicate observations: dropping every other one costs almost no
+## information and halves the design matrix. MAX_TRAIN then caps what is
+## left -- 40 parameters do not need 300,000 rows, and the estimates are
+## indistinguishable well below that.
+TRAIN_ORIGIN_STEP <- 2
+MAX_TRAIN         <- 120000
+set.seed(20260904)
+
 ## ---------------------------------------------------------------------
 ## [22.1] Specifications
 ##
@@ -165,6 +183,23 @@ for (h in H_SET) {
 ## thresholds restores monotonicity and is the standard fix; it also cannot
 ## make the fit worse in the L2 sense.
 ## ---------------------------------------------------------------------
+## Build a model matrix for `d` aligned to a fitted model's columns.
+## Used by BOTH the distribution regression and the norm_ls benchmark.
+## predict() cannot be used for either: it refuses factor levels that were
+## absent from training, which happens whenever a fold's training window
+## contains no A7 institutions and its test window does. Aligning by hand
+## gives an unseen level a zero column, which is the correct contribution
+## for a level the fit never saw.
+align_mm <- function(rhs, d, cols) {
+  mf <- model.frame(as.formula(paste("~", rhs)), data = d, na.action = na.pass)
+  X  <- model.matrix(as.formula(paste("~", rhs)), mf)
+  Xa <- matrix(0, nrow = nrow(X), ncol = length(cols),
+               dimnames = list(NULL, cols))
+  sh <- intersect(colnames(X), cols)
+  Xa[, sh] <- X[, sh]
+  Xa
+}
+
 dr_fit <- function(dtr, rhs, thresholds, verbose = FALSE) {
   mf <- model.frame(as.formula(paste("~", rhs)), data = dtr,
                     na.action = na.pass)
@@ -182,9 +217,16 @@ dr_fit <- function(dtr, rhs, thresholds, verbose = FALSE) {
               dimnames = list(colnames(X), NULL))
   why <- character(length(thresholds))
 
+  ## WARM STARTS. The thresholds are a rising sequence and their
+  ## coefficient vectors move smoothly, so the previous solution is a good
+  ## starting point for the next. This is the single largest speed win
+  ## available here -- IRLS typically drops from twenty-odd iterations to a
+  ## handful -- and it costs nothing in accuracy.
+  start <- NULL
+
   for (m in seq_along(thresholds)) {
     zz <- as.numeric(yv <= thresholds[m])
-    if (mean(zz) < 0.002 || mean(zz) > 0.998) { why[m] <- "degenerate"; next }
+    if (mean(zz) < 0.01 || mean(zz) > 0.99) { why[m] <- "degenerate"; next }
 
     ## WARNINGS ARE SUPPRESSED, NOT TREATED AS FAILURE.
     ## "fitted probabilities numerically 0 or 1 occurred" is routine for a
@@ -193,22 +235,43 @@ dr_fit <- function(dtr, rhs, thresholds, verbose = FALSE) {
     ## the pattern script 11 uses for Arima, where it IS right -- throws
     ## away most of the grid here, leaves an all-NA CDF, and surfaces much
     ## later as a NaN in the count reconciliation. Errors still fail.
-    fit <- tryCatch(suppressWarnings(glm.fit(X, zz, family = binomial())),
-                    error = function(e) NULL)
+    fit <- tryCatch(
+      suppressWarnings(glm.fit(X, zz, family = binomial(), start = start,
+                               control = glm.control(maxit = GLM_MAXIT))),
+      error = function(e) NULL)
 
-    if (is.null(fit))              { why[m] <- "error";      next }
-    if (!isTRUE(fit$converged))    { why[m] <- "no converge"; next }
+    ## A start that leads nowhere should not poison the rest of the grid
+    if (is.null(fit) && !is.null(start)) {
+      start <- NULL
+      fit <- tryCatch(
+        suppressWarnings(glm.fit(X, zz, family = binomial(),
+                                 control = glm.control(maxit = GLM_MAXIT))),
+        error = function(e) NULL)
+    }
+    if (is.null(fit)) { why[m] <- "error"; next }
+
     cf <- fit$coefficients
     ## Aliased columns come back NA from glm.fit. Zero them: the column
     ## contributes nothing, which is what aliasing means, rather than
     ## poisoning the whole threshold.
     cf[is.na(cf)] <- 0
-    if (!all(is.finite(cf)))       { why[m] <- "nonfinite";  next }
+    if (!all(is.finite(cf))) { why[m] <- "nonfinite"; next }
+
+    ## A fit that hit the iteration cap is KEPT, and flagged. Under
+    ## separation the likelihood has no interior maximum, so IRLS will
+    ## never report convergence however long it runs -- but the fitted
+    ## probabilities it produces at that threshold are pinned near 0 or 1,
+    ## which is the right answer there. Rearrangement and interpolation
+    ## downstream are indifferent to how the coefficients got large.
+    ## Discarding these was what left 13 of 25 thresholds empty.
+    if (!isTRUE(fit$converged)) why[m] <- "maxit (kept)"
+
     B[, m] <- cf
+    start  <- cf
   }
 
   n_ok <- sum(!apply(is.na(B), 2, all))
-  if (verbose || n_ok < 0.5 * length(thresholds))
+  if (verbose || n_ok < 0.6 * length(thresholds))
     cat(sprintf("   dr_fit: %d/%d thresholds fitted   %s\n",
                 n_ok, length(thresholds),
                 paste(names(sort(table(why[why != ""]), decreasing = TRUE)),
@@ -222,14 +285,7 @@ dr_fit <- function(dtr, rhs, thresholds, verbose = FALSE) {
 }
 
 dr_cdf_matrix <- function(fit, dte) {
-  mf <- model.frame(as.formula(paste("~", fit$rhs)), data = dte,
-                    na.action = na.pass)
-  X  <- model.matrix(as.formula(paste("~", fit$rhs)), mf)
-  ## Align to the training columns; anything unseen contributes nothing
-  Xa <- matrix(0, nrow = nrow(X), ncol = length(fit$cols),
-               dimnames = list(NULL, fit$cols))
-  sh <- intersect(colnames(X), fit$cols)
-  Xa[, sh] <- X[, sh]
+  Xa <- align_mm(fit$rhs, dte, fit$cols)
 
   ## A row with a missing covariate would produce an NA row here and the
   ## NA then travels all the way to the count reconciliation. Nothing
@@ -238,8 +294,11 @@ dr_cdf_matrix <- function(fit, dte) {
     stop("dr_cdf_matrix: ", sum(!complete.cases(Xa)),
          " test rows have missing covariates.")
 
+  ## plogis rather than 1/(1+exp(-eta)): the separation-driven fits kept at
+  ## [22.3] can produce very large |eta|, where the explicit form overflows
+  ## to NaN and the implicit one does not.
   eta <- Xa %*% fit$B
-  Fm  <- 1 / (1 + exp(-eta))
+  Fm  <- plogis(eta)
 
   ## Thresholds where the logit could not be fitted: carry the neighbour
   bad <- apply(is.na(Fm), 2, all)
@@ -335,17 +394,35 @@ bench_probs <- function(kind, dtr, dte) {
   }
 
   if (kind == "norm_ls") {
-    ## Mean model plus fitted spread -- the soft-count analogue.
-    ## The spread model must be fitted on exactly the rows the mean model
-    ## used, so index off the fitted object rather than off dtr.
-    m_mu <- lm(as.formula(paste("dy ~", rhs_full)), data = dtr)
-    used <- as.integer(names(residuals(m_mu)))
-    dsd  <- dtr[used, ]
-    dsd$la <- log(pmax(abs(residuals(m_mu)), 1e-4))
-    m_sd <- lm(as.formula(paste("la ~", rhs_full)), data = dsd)
-    mu <- predict(m_mu, newdata = dte)
-    sg <- exp(predict(m_sd, newdata = dte)) * sqrt(pi / 2)   # |N| -> sd
-    sg <- pmax(sg, 0.02)
+    ## Mean model plus fitted spread -- the soft-count analogue, and the
+    ## comparator that decides whether modelling the whole distribution was
+    ## worth it.
+    ##
+    ## Fitted with lm.fit and align_mm rather than lm/predict. predict.lm
+    ## errors with "factor cat_f has new levels" whenever the test window
+    ## contains a category the training window does not -- which happens
+    ## for A7 in the early folds, where there are barely any $10B credit
+    ## unions to train on. Manual alignment gives that column a zero
+    ## coefficient instead of failing the fold.
+    mf   <- model.frame(as.formula(paste("~", rhs_full)), data = dtr,
+                        na.action = na.pass)
+    Xtr  <- model.matrix(as.formula(paste("~", rhs_full)), mf)
+    ok   <- complete.cases(Xtr)
+    Xtr  <- Xtr[ok, , drop = FALSE]
+    ytr  <- dtr$dy[ok]
+    keep <- apply(Xtr, 2, function(z) length(unique(z)) > 1); keep[1] <- TRUE
+    Xtr  <- Xtr[, keep, drop = FALSE]
+
+    b_mu <- lm.fit(Xtr, ytr)$coefficients; b_mu[is.na(b_mu)] <- 0
+    r    <- ytr - as.numeric(Xtr %*% b_mu)
+    b_sd <- lm.fit(Xtr, log(pmax(abs(r), 1e-4)))$coefficients
+    b_sd[is.na(b_sd)] <- 0
+
+    Xte <- align_mm(rhs_full, dte, colnames(Xtr))
+    mu  <- as.numeric(Xte %*% b_mu)
+    sg  <- exp(as.numeric(Xte %*% b_sd)) * sqrt(pi / 2)      # E|N| -> sd
+    sg  <- pmax(pmin(sg, 5), 0.02)
+
     for (k in seq_len(N_CAT)) {
       zl <- LOG_EDGE[k]     - dte$y_raw
       zh <- LOG_EDGE[k + 1] - dte$y_raw
@@ -427,11 +504,24 @@ for (h in H_SET) {
 
   for (fi in seq_along(folds)) {
     f <- folds[[fi]]
-    dtr <- d_h[d_h$q_index <= f$train_max_origin, ]
     dte <- d_h[d_h$q_index %in% f$test, ]
+
+    ## Thin the training origins (see TRAIN_ORIGIN_STEP), keeping the most
+    ## recent ones, then cap the row count. Both cuts are on the TRAINING
+    ## side only -- the test fold is scored in full, so the fold sizes and
+    ## the count reconciliation are unaffected.
+    tr_or <- sort(unique(d_h$q_index[d_h$q_index <= f$train_max_origin]),
+                  decreasing = TRUE)
+    tr_or <- tr_or[seq(1, length(tr_or), by = TRAIN_ORIGIN_STEP)]
+    dtr   <- d_h[d_h$q_index %in% tr_or, ]
+    n_pre <- nrow(dtr)
+    if (nrow(dtr) > MAX_TRAIN)
+      dtr <- dtr[sort(sample.int(nrow(dtr), MAX_TRAIN)), ]
+
     if (nrow(dtr) < 5000 || nrow(dte) < 200) next
 
-    thr <- unique(quantile(dtr$dy, seq(0.02, 0.98, length.out = N_THRESH)))
+    thr <- unique(quantile(dtr$dy,
+                           seq(THRESH_LO, THRESH_HI, length.out = N_THRESH)))
     lo  <- min(dtr$dy) - 0.5; hi <- max(dtr$dy) + 0.5
 
     for (sp in names(spec_list)) {
@@ -457,8 +547,8 @@ for (h in H_SET) {
         cbind(data.frame(h = h, fold = fi, spec = bk), s)
     }
 
-    cat(sprintf("h=%2d fold %d  train %6d  test %5d   (%s elapsed)\n",
-                h, fi, nrow(dtr), nrow(dte),
+    cat(sprintf("h=%2d fold %d  train %6d of %6d  test %5d   (%s elapsed)\n",
+                h, fi, nrow(dtr), n_pre, nrow(dte),
                 format(round(difftime(Sys.time(), t0, units = "mins"), 1))))
   }
 }
