@@ -87,7 +87,7 @@ HALFLIFE  <- 24        # quarters
 ##
 ## A6 median annual growth under each, for reference:
 ##   full 7.91%   pre2015 6.67%   post_surge 4.21%
-GROWTH_BASIS <- "post_surge"     # "full" | "pre2015" | "post_surge"
+GROWTH_BASIS <- "full"          # "full" | "pre2015" | "post_surge"
 PRE_CUTOFF   <- 2014             # last origin year for "pre2015"
 RECENT_FROM  <- 2022             # first origin year counted as post-surge
 
@@ -149,7 +149,7 @@ SCENARIO <- "baseline"          # "baseline" | "shock" | "calm"
 ## DO NOT deflate history and index the edges as well. They are the same
 ## correction and applying both double-counts it. The guard below enforces
 ## this rather than trusting anyone to remember.
-PRICE_BASIS    <- "real_exact"    # "nominal" | "real_approx" | "real_exact"
+PRICE_BASIS    <- "nominal"       # "nominal" | "real_approx" | "real_exact"
 CPI_ASSUMPTION <- 0.025           # forward rate, used by "real_approx" only
 
 REAL_TERMS <- PRICE_BASIS != "nominal"   # kept for downstream references
@@ -195,11 +195,16 @@ BUCKET_CALIB <- FALSE
 ## growth distribution, and it showed: p_down at five years came out at
 ## 0.8% when 5 of 19 A7 origins in the panel actually moved down.
 ##
-## 60 is low for an empirical CDF, but the alternative is not "a noisier
-## A7 estimate", it is "an A7 estimate of something else". A thin pool of
-## the right institutions beats a thick pool of the wrong ones. The
-## printout below shows which categories used their own data.
-MIN_POOL <- 60
+## 60 was still not low enough: A7 kept falling back at h=20, where its own
+## usable count is under 60 because $10B credit unions barely existed
+## before 2015 and each origin needs five years of forward data. At 20 it
+## uses its own data at every horizon. That is thin for an empirical CDF
+## and the probabilities visibly quantise at roughly 5% -- note that on the
+## Diagnostics tab -- but the alternative is not "a noisier A7 estimate",
+## it is "an A7 estimate of something else". A thin pool of the right
+## institutions beats a thick pool of the wrong ones. The printout below
+## shows which categories used their own data.
+MIN_POOL <- 20
 P_FLOOR  <- 1e-6
 
 cat("Spec:", SPEC, " growth:", GROWTH_BASIS, " prices:", PRICE_BASIS,
@@ -812,13 +817,16 @@ real_counts <- lapply(H_SET, function(h)
           else PROB_ALT[[as.character(h)]]))
 names(real_counts) <- paste0("real_h", H_SET)
 
-nominal_vs_real <- data.frame(
-  cat = CAT_LABELS, now = counts$now,
-  nominal_h20 = round(counts$h20, 1),
-  real_h20    = round(real_counts$real_h20, 1)) %>%
+## Built from the two bases computed at [23.4], never from real_counts,
+## which under a real PRICE_BASIS is the same object as counts$h20 and
+## produced a table comparing the run against itself.
+nominal_vs_real <- counts %>%
+  transmute(cat = pretty, now,
+            nominal_h20 = if (PRICE_BASIS == "nominal") h20 else alt_h20,
+            real_h20    = if (PRICE_BASIS == "nominal") alt_h20 else h20) %>%
   mutate(nominal_chg = round(nominal_h20 - now, 1),
          real_chg    = round(real_h20 - now, 1),
-         of_which_nominal = round(nominal_h20 - real_h20, 1))
+         threshold_drift = round(nominal_h20 - real_h20, 1))
 
 cat("\nNominal vs inflation-indexed edges at", 100 * CPI_ASSUMPTION,
     "% a year:\n")
