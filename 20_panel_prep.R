@@ -49,6 +49,30 @@ END_Y <- 2026; END_Q <- 2
 CLOSED_COHORT <- TRUE
 
 ## ---------------------------------------------------------------------
+## REGIONS IN SCOPE
+##
+## Region 8 is NCUA's Office of National Examinations and Supervision,
+## which supervises consumer credit unions above roughly $15B instead of a
+## regional office. Excluding it -- as the first version of this script did
+## -- removed the LARGEST institutions in the industry from the cohort
+## entirely, and did so at the moment they grew past the threshold.
+##
+## The damage was threefold: the $15B+ count came out at 3 against about
+## 11 in published NCUA figures; the A6-to-A7 crossings that actually
+## happened were dropped from history; and A7's own growth distribution was
+## built only from institutions that did NOT grow enough to leave. It also
+## explains the 29 "filter" cases at [20.5], which were credit unions
+## moving into ONES supervision, not disappearing.
+##
+## Region 8 is a SUPERVISORY office, not a geography, so the regional tabs
+## now carry four groups rather than three and the fourth is not a place.
+## The eventual fix is to reassign these institutions to a geographic
+## region using their prior regional history, falling back to headquarters
+## state -- NCUA has already made that assignment for most of them. Until
+## then they are reported as their own group and the tab must say so.
+REGIONS <- c(1, 2, 3, 8)
+
+## ---------------------------------------------------------------------
 ## [20.1] Load. Same columns as 10.1 -- the exit coding at [20.5] needs
 ## join_number_acquired and latest_event_code, so pull them here.
 ## ---------------------------------------------------------------------
@@ -118,13 +142,17 @@ as.data.frame(qgrid[c(1, 12, 15, 16, 60, 61, 70, 86), ])
 ## ---------------------------------------------------------------------
 ## [20.4] The panel: everyone alive in each quarter, not just survivors
 ##
-## Same filters as 10.3 EXCEPT the freeze. Regions 1-3 and cu_type 1/2 are
-## applied row by row, so a credit union that changed region or charter
-## type mid-sample leaves a hole. [20.5] separates those holes from real
-## exits -- do not skip that check.
+## Same filters as 10.3 EXCEPT the freeze and the region set. cu_type 1/2
+## is applied row by row, so a credit union that changed charter type
+## mid-sample leaves a hole. [20.5] separates those holes from real exits.
+##
+## With region 8 included, a move into ONES supervision no longer creates a
+## hole, so the "filter" count at [20.5] should fall close to zero. If it
+## does not, something else is dropping institutions and needs finding
+## before anything downstream is trusted.
 ## ---------------------------------------------------------------------
 panel <- raw %>%
-  filter(cu_type %in% c(1, 2), region %in% c(1, 2, 3),
+  filter(cu_type %in% c(1, 2), region %in% REGIONS,
          !is.na(join_number), !is.na(assets_tot), assets_tot > 0,
          year >= START_YEAR,
          year < END_Y | (year == END_Y & quarter <= END_Q)) %>%
@@ -334,10 +362,20 @@ nrow(cohort)
 cohort %>% count(region, cu_type) %>% as.data.frame()
 cohort %>% count(asset_cat_now) %>% as.data.frame()
 
-## Sanity: does this reproduce the frozen-cohort count from script 10?
-## Should be 4,202. If it is not, the spell logic at [20.4] differs from
-## 10.6's contiguous-run rule and that has to be reconciled first.
-cat("Cohort at 2026Q2:", nrow(cohort), " (script 10 had 4,202)\n")
+## Cohort size. The frozen-cohort track in script 10 had 4,202 on regions
+## 1-3 only; this will be larger by the number of ONES institutions, which
+## should be roughly a dozen. A much bigger gap means the region filter is
+## picking up something unintended.
+cat("Cohort at 2026Q2:", nrow(cohort),
+    " (script 10 had 4,202 on regions 1-3 only)\n")
+print(cohort %>% count(region) %>% as.data.frame())
+
+## The institutions region 8 adds, largest first. These are the ones that
+## were missing, and the list should be recognisable.
+cohort %>% filter(region == 8) %>%
+  transmute(cu_name, state, assets_b = round(assets_now / 1e9, 2),
+            asset_cat_now) %>%
+  arrange(desc(assets_b)) %>% as.data.frame()
 
 ## Estimation panel size
 cat("Institutions ever in panel:", n_distinct(panel$join_number), "\n")
@@ -345,7 +383,7 @@ cat("Institution-quarters:      ", nrow(panel), "\n")
 cat("Real exits observed:       ", sum(!is.na(exits$exit_q)), "\n")
 
 saveRDS(list(panel = panel, cohort = cohort, exits = exits, qgrid = qgrid,
-             CLOSED_COHORT = CLOSED_COHORT,
+             CLOSED_COHORT = CLOSED_COHORT, REGIONS = REGIONS,
              CAT_LABELS = CAT_LABELS, CAT_PRETTY = CAT_PRETTY,
              BREAKS = BREAKS, LOG_EDGE = LOG_EDGE, N_CAT = N_CAT,
              N_Q = N_Q, START_YEAR = START_YEAR, ASSET_SCALE = ASSET_SCALE),

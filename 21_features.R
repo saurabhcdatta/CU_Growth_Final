@@ -367,7 +367,9 @@ apply_scale <- function(d) {
   ## copy before standardising. 22 places the category edges with y_raw.
   d$y_raw <- d$y
   for (v in FEAT_NUM) d[[v]] <- (d[[v]] - SCALE_MU[v]) / SCALE_SD[v]
-  d$region  <- factor(d$region,  levels = c(1, 2, 3))
+  ## Levels must cover every region in scope, including 8 (ONES). A level
+  ## missing here silently drops those institutions inside model.matrix.
+  d$region  <- factor(d$region,  levels = REGIONS)
   d$cu_type <- factor(d$cu_type, levels = c(1, 2))
   d$cat_f   <- factor(d$cat_k,   levels = 1:N_CAT)
   d
