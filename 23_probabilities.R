@@ -58,6 +58,39 @@ SPEC <- "emp_cell"
 WEIGHTED  <- FALSE
 HALFLIFE  <- 24        # quarters
 
+## ---------------------------------------------------------------------
+## GROWTH BASIS -- which years the growth distribution is learned from
+##
+## This is the single most consequential choice in the script and it must
+## be stated on the Method tab, with the alternatives shown. It is a
+## judgement about which period represents the next five years, not a
+## finding.
+##
+##   "full"       every usable origin. Includes the 2020-21 deposit surge,
+##                which raises measured growth in every category.
+##   "pre2015"    origins through 2014 only. A full five-year window from
+##                a period containing neither the 2008 aftermath nor the
+##                pandemic surge. The least tunable of the three -- a date
+##                restriction anyone can check.
+##   "post_surge" shifts each category's distribution by the gap between
+##                its post-2022 growth (measured at h=12, where clean
+##                windows exist) and its full-history growth. Reflects the
+##                deposit runoff and rate shock, which is not a neutral
+##                period either -- expect this to under-state growth as
+##                much as "full" over-states it.
+##
+## APPLIED TO EVERY CATEGORY, not just A6. Adjusting one category because
+## its answer is inconvenient and leaving the rest alone is not a growth
+## assumption, it is a thumb on one number. If post-surge growth is the
+## right basis it is the right basis for A1 as well, and the counts below
+## will move accordingly.
+##
+## A6 median annual growth under each, for reference:
+##   full 7.91%   pre2015 6.67%   post_surge 4.21%
+GROWTH_BASIS <- "post_surge"     # "full" | "pre2015" | "post_surge"
+PRE_CUTOFF   <- 2014             # last origin year for "pre2015"
+RECENT_FROM  <- 2022             # first origin year counted as post-surge
+
 ## Scenario. The regime covariates built in [21.4] are unused by emp_cell,
 ## which conditions only on category. The empirical analogue of a scenario
 ## is to restrict the training origins: "shock" fits the distribution using
@@ -83,7 +116,8 @@ BUCKET_CALIB <- FALSE
 MIN_POOL <- 60
 P_FLOOR  <- 1e-6
 
-cat("Spec:", SPEC, " weighted:", WEIGHTED, " scenario:", SCENARIO, "\n")
+cat("Spec:", SPEC, " basis:", GROWTH_BASIS,
+    " weighted:", WEIGHTED, " scenario:", SCENARIO, "\n")
 
 ## ---------------------------------------------------------------------
 ## [23.2] The forecast set -- all 4,202
@@ -182,6 +216,71 @@ build_pools <- function(h) {
 
 POOLS <- lapply(H_SET, build_pools)
 names(POOLS) <- as.character(H_SET)
+
+## ---------------------------------------------------------------------
+## [23.3b] Apply the growth basis
+##
+## "pre2015" rebuilds the pools from the restricted origin set. Nothing
+## else changes, so the fallback logic and MIN_POOL still apply.
+##
+## "post_surge" cannot rebuild: at h=20 the last usable origin is 2021Q2,
+## so no five-year window lies entirely after the surge -- five years have
+## not passed. The distribution is therefore SHIFTED rather than re-fitted,
+## by a per-category delta measured at h=12 where clean windows do exist.
+## The shape of each category's growth distribution is kept; only its
+## location moves. That is an assumption and it is stated as one.
+## ---------------------------------------------------------------------
+origin_year <- function(qi) START_YEAR + (qi - 1) %/% 4
+
+growth_delta <- function() {
+  ## per-quarter log-growth gap, by category, measured at h = 12
+  us  <- feat[["usable_surv_h12"]]
+  d   <- feat[us, ]; d$dy <- d[["dy_h12"]]
+  d   <- d[!is.na(d$dy), ]
+  d$yr <- origin_year(d$q_index)
+
+  vapply(seq_len(N_CAT), function(k) {
+    all_k <- d$dy[d$cat_k == k]
+    rec_k <- d$dy[d$cat_k == k & d$yr >= RECENT_FROM]
+    if (length(rec_k) < 100) return(0)          # too thin to shift on
+    (median(rec_k) - median(all_k)) / 12        # per quarter
+  }, 0)
+}
+
+if (GROWTH_BASIS == "pre2015") {
+  build_pools_pre <- function(h) {
+    keep <- origin_year(feat$q_index) <= PRE_CUTOFF
+    old_feat <- feat
+    assign("feat", feat[keep, ], envir = .GlobalEnv)
+    out <- build_pools(h)
+    assign("feat", old_feat, envir = .GlobalEnv)
+    out
+  }
+  POOLS <- lapply(H_SET, build_pools_pre)
+  names(POOLS) <- as.character(H_SET)
+  DELTA <- rep(0, N_CAT)
+}
+
+if (GROWTH_BASIS == "post_surge") {
+  DELTA <- growth_delta()
+  for (h in H_SET)
+    for (k in seq_len(N_CAT))
+      POOLS[[as.character(h)]][[as.character(k)]]$dy <-
+        POOLS[[as.character(h)]][[as.character(k)]]$dy + DELTA[k] * h
+}
+
+if (GROWTH_BASIS == "full") DELTA <- rep(0, N_CAT)
+
+## What the basis did, in annual growth terms. Every category should move,
+## and if one of them does not, say why on the Method tab.
+cat("
+Growth basis:", GROWTH_BASIS, "
+")
+print(data.frame(
+  cat = CAT_LABELS,
+  shift_ann_pp = round(100 * (exp(DELTA * 4) - 1), 2),
+  med_ann_h20  = round(100 * (exp(sapply(POOLS[["20"]], pool_q, 0.50) *
+                                  4 / 20) - 1), 2)))
 
 ## Pool sizes, source and shape. `src` is the thing to read first: any
 ## category showing "window" is being forecast with its neighbours' growth
@@ -555,6 +654,8 @@ saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              CPI_ASSUMPTION = CPI_ASSUMPTION,
              SPEC = SPEC, WEIGHTED = WEIGHTED, HALFLIFE = HALFLIFE,
              SCENARIO = SCENARIO, BUCKET_CALIB = BUCKET_CALIB,
+             GROWTH_BASIS = GROWTH_BASIS, DELTA = DELTA,
+             PRE_CUTOFF = PRE_CUTOFF, RECENT_FROM = RECENT_FROM,
              MIN_POOL = MIN_POOL, P_FLOOR = P_FLOOR,
              make_pool = make_pool, pool_cdf = pool_cdf, pool_q = pool_q,
              build_pools = build_pools,
