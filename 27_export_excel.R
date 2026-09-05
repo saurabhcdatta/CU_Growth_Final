@@ -33,7 +33,30 @@ library(dplyr)
 library(tidyr)
 
 setwd("S:/Projects/Credit_Union_Growth_Forecast/Data")
-source("0_xlsx_helpers.R")
+
+## The helpers live in the project root, not in Data. Search a few likely
+## places rather than assuming, so this does not break when the working
+## directory changes.
+find_src <- function(fn) {
+  cand <- c(fn, file.path("..", fn),
+            file.path("S:/Projects/Credit_Union_Growth_Forecast", fn))
+  hit <- cand[file.exists(cand)][1]
+  if (is.na(hit)) stop(fn, " not found. Searched: ",
+                       paste(cand, collapse = ", "))
+  cat("sourcing", normalizePath(hit), "\n")
+  source(hit)
+}
+
+find_src("0_xlsx_helpers.R")
+
+## MUST be sourced AFTER the helpers -- it redefines xlsx_write() to zip
+## in base R. The helper's own three methods all need something this
+## machine does not have: the `zip` package (blocked), zip.exe on the PATH
+## (absent -- "the system cannot find the file specified"), or PowerShell
+## resolvable by name. 0_xlsx_helpers.R itself is untouched, so scripts
+## 14 and 16 keep their original behaviour.
+find_src("0b_zip_base.R")
+stopifnot(exists("zip_base"))
 
 ## prep <- readRDS("panel_prep.rds");     list2env(prep, .GlobalEnv)
 ## prb  <- readRDS("panel_probs.rds");    list2env(prb,  .GlobalEnv)
