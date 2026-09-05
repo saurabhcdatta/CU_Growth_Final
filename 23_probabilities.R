@@ -748,6 +748,77 @@ counts %>%
 
 colSums(counts[, paste0("h", H_SET)])       # each must be 4,202
 
+## ---------------------------------------------------------------------
+## [23.8b] Supplementary thresholds
+##
+## Examination staff work to cut-offs that are not category edges. The
+## probability of clearing any dollar level falls straight out of the same
+## fitted CDF -- no extra model, no re-fitting -- because the method
+## produces a distribution per institution rather than a category label.
+##
+## These are counts ABOVE a level, not a new category, so they overlap the
+## table above: every $15B institution is also counted in A7. Present them
+## as a supplementary line, never as another row of the main table, or the
+## total stops adding to 4,202.
+##
+## THE CAVEAT IS SHARPER HERE THAN ANYWHERE ELSE. A $15B threshold sits in
+## the far right tail of a pool of about 21 observations, so the estimate
+## rests on a handful of historical cases and moves in coarse steps. It is
+## a reasonable order of magnitude and not a precise figure.
+## ---------------------------------------------------------------------
+EXTRA_THRESHOLDS <- c(15e9, 20e9)
+
+p_above <- function(h, level) {
+  pl <- POOLS[[as.character(h)]]
+  z  <- log(level) - fc$y_raw
+  vapply(seq_len(nrow(fc)), function(i)
+    1 - pool_cdf(pl[[as.character(fc$cat_k[i])]], z[i]), 0)
+}
+
+extra <- lapply(EXTRA_THRESHOLDS, function(L) {
+  data.frame(threshold = L,
+             label = paste0("$", format(L / 1e9, trim = TRUE), "B and over"),
+             now = sum(fc$assets_now >= L),
+             h4  = round(sum(p_above(4,  L)), 1),
+             h12 = round(sum(p_above(12, L)), 1),
+             h20 = round(sum(p_above(20, L)), 1))
+})
+extra <- bind_rows(extra)
+
+cat("\n=== SUPPLEMENTARY: counts above additional thresholds ===\n")
+cat("Overlaps the table above -- these institutions are also counted in\n")
+cat("A7. Not a partition; do not add to the total.\n\n")
+print(as.data.frame(extra))
+
+## Must be nested: $20B+ <= $15B+ <= A7 count, at every horizon
+for (h in H_SET) {
+  col <- paste0("h", h)
+  stopifnot(all(diff(rev(extra[[col]])) >= -1e-9),
+            max(extra[[col]]) <= counts[[col]][N_CAT] + 1e-9)
+}
+cat("\nNesting check passed: $20B+ <= $15B+ <= $10B+ at every horizon.\n")
+
+## Who they are, at five years. The named list matters more than the count
+## for examination planning.
+above15 <- fc %>%
+  mutate(p15 = p_above(20, 15e9),
+         med20 = inst$assets_med_h20) %>%
+  filter(p15 > 0.05) %>%
+  arrange(desc(p15)) %>%
+  transmute(cu_name, region, cu_type,
+            assets_now_b = round(assets_now / 1e9, 2),
+            med_h20_b = round(med20 / 1e9, 2),
+            p_above_15B = round(p15, 3),
+            pool_n = inst$pool_n_h20[match(join_number, inst$join_number)])
+
+cat("\nInstitutions with a 5% or better chance of exceeding $15B by",
+    qgrid$q_label[N_Q + 20], ":\n")
+print(as.data.frame(above15))
+
+cat("\nRead p_above_15B as indicative. It comes from the right tail of a\n",
+    "pool of", POOLS[["20"]][["7"]]$n, "to", POOLS[["20"]][["6"]]$n,
+    "observations depending on the institution's category.\n")
+
 ## Transition matrices. NOT a fitted object -- the average probability
 ## vector of the institutions starting in each row. That is why it can be
 ## cut by region and charter without fitting anything separately, and why
@@ -895,6 +966,8 @@ inst %>%
 saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              TRANS = TRANS, counts = counts, cell_counts = cell_counts,
              calib_factors = calib_factors,
+             extra = extra, above15 = above15,
+             EXTRA_THRESHOLDS = EXTRA_THRESHOLDS, p_above = p_above,
              nominal_vs_real = nominal_vs_real, real_counts = real_counts,
              CPI_ASSUMPTION = CPI_ASSUMPTION, REAL_TERMS = REAL_TERMS,
              PRICE_BASIS = PRICE_BASIS, CPI = CPI, LOGCPI = LOGCPI,
