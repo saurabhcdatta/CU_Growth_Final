@@ -775,28 +775,68 @@ p_above <- function(h, level) {
     1 - pool_cdf(pl[[as.character(fc$cat_k[i])]], z[i]), 0)
 }
 
+## CALIBRATION APPLIES HERE TOO. p_above() reads POOLS directly and never
+## sees the raking done to PROB at [23.6], so with BUCKET_CALIB on the
+## supplementary counts would be uncalibrated while the A7 count they must
+## nest inside is calibrated -- and $15B+ can then exceed $10B+.
+##
+## Every institution above $15B is by definition in A7, so A7's measured
+## bias applies to these counts as well. Scaling by the A7 factor is the
+## same correction, applied to the same population, from the same source.
+a7_factor <- function(h) {
+  if (!BUCKET_CALIB) return(1)
+  f <- calib_factors$f[calib_factors$h == h &
+                       calib_factors$cat == CAT_LABELS[N_CAT]]
+  if (!length(f) || !is.finite(f)) 1 else f
+}
+
 extra <- lapply(EXTRA_THRESHOLDS, function(L) {
   data.frame(threshold = L,
              label = paste0("$", format(L / 1e9, trim = TRUE), "B and over"),
              now = sum(fc$assets_now >= L),
-             h4  = round(sum(p_above(4,  L)), 1),
-             h12 = round(sum(p_above(12, L)), 1),
-             h20 = round(sum(p_above(20, L)), 1))
+             h4  = round(sum(p_above(4,  L)) * a7_factor(4),  1),
+             h12 = round(sum(p_above(12, L)) * a7_factor(12), 1),
+             h20 = round(sum(p_above(20, L)) * a7_factor(20), 1))
 })
 extra <- bind_rows(extra)
+
+if (BUCKET_CALIB)
+  cat("A7 calibration applied to supplementary thresholds:",
+      paste(sprintf("h%d=%.3f", H_SET, sapply(H_SET, a7_factor)),
+            collapse = "  "), "\n")
 
 cat("\n=== SUPPLEMENTARY: counts above additional thresholds ===\n")
 cat("Overlaps the table above -- these institutions are also counted in\n")
 cat("A7. Not a partition; do not add to the total.\n\n")
 print(as.data.frame(extra))
 
-## Must be nested: $20B+ <= $15B+ <= A7 count, at every horizon
+## Must be nested: $20B+ <= $15B+ <= A7 count, at every horizon.
+##
+## The thresholds and the category count come from the same distributions
+## but are computed by different routes, so exact equality is not expected;
+## a small overshoot is arithmetic, a large one means the calibration is
+## being applied inconsistently. Report the gap rather than aborting, since
+## the numbers above are still worth seeing when it fails.
+nest_ok <- TRUE
 for (h in H_SET) {
   col <- paste0("h", h)
-  stopifnot(all(diff(rev(extra[[col]])) >= -1e-9),
-            max(extra[[col]]) <= counts[[col]][N_CAT] + 1e-9)
+  if (!all(diff(rev(extra[[col]])) >= -1e-9)) {
+    cat("  h =", h, ": thresholds not monotone --", extra[[col]], "\n")
+    nest_ok <- FALSE
+  }
+  gap <- max(extra[[col]]) - counts[[col]][N_CAT]
+  if (gap > 1e-9) {
+    cat(sprintf("  h = %2d: $%sB+ is %.1f vs A7 %.1f  (over by %.1f)\n",
+                h, format(max(EXTRA_THRESHOLDS) / 1e9),
+                max(extra[[col]]), counts[[col]][N_CAT], gap))
+    nest_ok <- FALSE
+  }
 }
-cat("\nNesting check passed: $20B+ <= $15B+ <= $10B+ at every horizon.\n")
+if (nest_ok)
+  cat("\nNesting check passed: $20B+ <= $15B+ <= $10B+ at every horizon.\n")
+else
+  cat("\nNesting check FAILED -- see above. Do not publish the\n",
+      "supplementary thresholds until this reconciles.\n")
 
 ## Who they are, at five years. The named list matters more than the count
 ## for examination planning.
@@ -968,6 +1008,7 @@ saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              calib_factors = calib_factors,
              extra = extra, above15 = above15,
              EXTRA_THRESHOLDS = EXTRA_THRESHOLDS, p_above = p_above,
+             a7_factor = a7_factor, nest_ok = nest_ok,
              nominal_vs_real = nominal_vs_real, real_counts = real_counts,
              CPI_ASSUMPTION = CPI_ASSUMPTION, REAL_TERMS = REAL_TERMS,
              PRICE_BASIS = PRICE_BASIS, CPI = CPI, LOGCPI = LOGCPI,
