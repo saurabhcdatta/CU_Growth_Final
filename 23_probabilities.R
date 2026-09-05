@@ -843,8 +843,7 @@ for (h in H_SET) {
 if (nest_ok) {
   cat("\nNesting check passed: $20B+ <= $15B+ <= $10B+ at every horizon.\n")
 } else {
-  cat("\nNesting check FAILED -- see above. Do not publish the",
-      "supplementary thresholds until this reconciles.\n")
+  cat("\nNesting check FAILED -- see above.\n")
 }
 
 ## Who they are, at five years. The named list matters more than the count
