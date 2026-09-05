@@ -593,7 +593,12 @@ if (BUCKET_CALIB) {
     names(f) <- calib_factors$cat[calib_factors$h == h]
     PROB[[as.character(h)]] <- rake(PROB[[as.character(h)]], f[CAT_LABELS])
   }
-  cat("Bucket calibration APPLIED.\n")
+  cat("Bucket calibration APPLIED. A7 factors:",
+      paste(sprintf("h%d=%.3f", H_SET,
+                    sapply(H_SET, function(h)
+                      calib_factors$f[calib_factors$h == h &
+                                      calib_factors$cat == CAT_LABELS[N_CAT]])),
+            collapse = "  "), "\n")
 } else {
   cat("Bucket calibration available but NOT applied (BUCKET_CALIB = FALSE).\n")
 }
@@ -832,11 +837,15 @@ for (h in H_SET) {
     nest_ok <- FALSE
   }
 }
-if (nest_ok)
+## Braces required. At top level `if (x) cat(...)` on one line followed by
+## `else` on the next parses as two statements -- R closes the if at the
+## newline and then finds a stray else.
+if (nest_ok) {
   cat("\nNesting check passed: $20B+ <= $15B+ <= $10B+ at every horizon.\n")
-else
-  cat("\nNesting check FAILED -- see above. Do not publish the\n",
+} else {
+  cat("\nNesting check FAILED -- see above. Do not publish the",
       "supplementary thresholds until this reconciles.\n")
+}
 
 ## Who they are, at five years. The named list matters more than the count
 ## for examination planning.
