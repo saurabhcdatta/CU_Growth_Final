@@ -269,9 +269,18 @@ movers <- lapply(H_SET, function(h) {
 })
 movers <- bind_rows(movers)
 
+## Expect an "up" column only. The ranking cut cannot assign downward --
+## see [24.7b] for why, and for the list that carries that information
+## instead. The expected down-move COUNT is still published; what is not
+## published is a downward ASSIGNMENT for any named institution.
 movers %>% count(h, direction) %>%
   pivot_wider(names_from = direction, values_from = n, values_fill = 0) %>%
   as.data.frame()
+
+for (h in H_SET)
+  cat(sprintf("h=%2d  named up %4d   expected down %5.1f (named as risk, not assigned)\n",
+              h, sum(movers$h == h & movers$direction == "up"),
+              sum(inst[[paste0("p_down_h", h)]])))
 
 movers %>% filter(h == 20) %>% count(from, to) %>% as.data.frame()
 
@@ -282,6 +291,73 @@ movers %>% filter(h == 20) %>% count(from, to) %>% as.data.frame()
 movers %>% filter(h == 20) %>% count(region, cu_type, direction) %>%
   pivot_wider(names_from = direction, values_from = n, values_fill = 0) %>%
   as.data.frame()
+
+## ---------------------------------------------------------------------
+## [24.7b] DOWN-RISK LIST
+##
+## The ranking cut cannot produce a downward assignment, and that is
+## structural rather than a defect in the data. It orders institutions by
+## median forecast assets, every median grows, and every category target
+## shifts upward -- so the ordering never changes and the cuts only ever
+## push institutions up the ladder.
+##
+## The probabilities disagree. They put roughly 22 institutions a category
+## lower at five years. Publishing 22 in the counts and naming none in the
+## lists is the kind of gap a reviewer finds in a minute.
+##
+## Rather than force the assignment rule to produce down-moves -- which
+## would cost monotonicity in size and reproducibility across refreshes --
+## the downward risk is published as its OWN list. These institutions are
+## NOT assigned to a lower category. The list says: on this institution's
+## own history and starting position, the probability of falling a
+## category is elevated relative to its peers. That is a different and more
+## honest claim than "we forecast it will shrink", and it is the one the
+## data supports.
+## ---------------------------------------------------------------------
+DOWN_N   <- 30        # how many to name
+DOWN_MIN <- 0.02      # floor: below this, do not name at all
+
+down_risk <- lapply(H_SET, function(h) {
+  inst %>%
+    mutate(p_down = .data[[paste0("p_down_h", h)]],
+           k_down = pmax(cat_k - 1, 1)) %>%
+    filter(p_down >= DOWN_MIN, cat_k > 1) %>%
+    arrange(desc(p_down)) %>%
+    head(DOWN_N) %>%
+    transmute(h = h, join_number, cu_name, region, cu_type,
+              from = asset_cat_now,
+              at_risk_of = CAT_LABELS[k_down],
+              assets_now_m = round(assets_now / 1e6, 1),
+              p10_m = round(.data[[paste0("assets_p10_h", h)]] / 1e6, 1),
+              p_down = round(p_down, 3),
+              pool_n = .data[[paste0("pool_n_h", h)]])
+})
+down_risk <- bind_rows(down_risk)
+
+## How much of the expected downward movement the named list captures.
+## If the top 30 hold only a small share, the risk is spread thin and the
+## list should be presented as illustrative rather than exhaustive.
+for (h in H_SET) {
+  tot <- sum(inst[[paste0("p_down_h", h)]])
+  cap <- sum(down_risk$p_down[down_risk$h == h])
+  cat(sprintf("h=%2d  expected down-moves %5.1f   top %d named capture %4.1f (%.0f%%)\n",
+              h, tot, DOWN_N, cap, 100 * cap / pmax(tot, 1e-9)))
+}
+
+cat("\nDown-risk list, five years:\n")
+print(as.data.frame(down_risk %>% filter(h == 20)))
+
+## Where the downward risk sits. A category with a high expected count but
+## no institution above DOWN_MIN is diffuse risk, not concentrated risk,
+## and the tab should say which it is.
+inst %>%
+  group_by(asset_cat_now) %>%
+  summarise(n = n(),
+            exp_down = round(sum(p_down_h20), 1),
+            max_p = round(max(p_down_h20), 3),
+            n_named = sum(join_number %in%
+                          down_risk$join_number[down_risk$h == 20]),
+            .groups = "drop") %>% as.data.frame()
 
 ## ---------------------------------------------------------------------
 ## [24.8] The institution table 27 exports
@@ -308,7 +384,13 @@ inst_out <- inst %>%
     assets_p90_5y = assets_p90_h20,
     p_up_5y   = round(p_up_h20, 3),
     p_same_5y = round(p_same_h20, 3),
-    p_down_5y = round(p_down_h20, 3))
+    p_down_5y = round(p_down_h20, 3),
+    ## Named on the down-risk list at [24.7b]. The assigned category is
+    ## still the ranking-cut result; this flags that the institution also
+    ## carries elevated downward probability, which the assignment alone
+    ## cannot express.
+    down_risk_5y = join_number %in%
+      down_risk$join_number[down_risk$h == 20])
 
 nrow(inst_out)
 head(as.data.frame(inst_out), 10)
@@ -323,6 +405,7 @@ for (h in c(4, 12, 20)) {
 cat("\nInstitution table reproduces the published counts at all horizons.\n")
 
 saveRDS(list(inst = inst, inst_out = inst_out, TARGET = TARGET,
-             movers = movers, a7 = a7, near_line = near_line,
+             movers = movers, down_risk = down_risk, a7 = a7,
+             near_line = near_line, DOWN_N = DOWN_N, DOWN_MIN = DOWN_MIN,
              apportion = apportion, assign_cut = assign_cut),
         file = "panel_assign.rds")
