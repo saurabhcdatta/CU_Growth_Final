@@ -452,12 +452,81 @@ stopifnot(!any(duplicated(vapply(SH, function(s) s$name, ""))),
 
 xlsx_write(SH, OUT)
 
-## Final tie-out, on the file's own numbers rather than on the objects
-cat("\nTie-out:\n")
-cat("  cohort            ", nrow(inst_out), "\n")
-cat("  Total tab, 5yr    ", round(sum(counts$h20), 1), "\n")
-cat("  Institutions tab  ", nrow(inst_tab), "\n")
-cat("  assigned 5yr      ", sum(table(inst_out$cat_5y)), "\n")
+## ---------------------------------------------------------------------
+## [27.14] What went into the workbook, on screen
+##
+## The same numbers as the tabs, printed so the run can be checked without
+## opening Excel. If a figure here looks wrong, it is wrong in the file.
+## ---------------------------------------------------------------------
+rule <- function(t) cat("\n", strrep("=", 74), "\n", t, "\n",
+                        strrep("=", 74), "\n", sep = "")
+
+rule(sprintf("COUNTS BY ASSET CATEGORY -- %s cohort, %s institutions",
+             qgrid$q_label[N_Q], format(nrow(inst_out), big.mark = ",")))
+print(as.data.frame(tot_tbl), row.names = FALSE)
+cat("\nTotals:", paste(sprintf("%s %.1f", c("today", H_LAB),
+      c(sum(counts$now), sum(counts$h4), sum(counts$h12), sum(counts$h20))),
+      collapse = "   "), "\n")
+
+rule("SUPPLEMENTARY THRESHOLDS -- overlapping, not part of the total")
+print(as.data.frame(extra_tbl), row.names = FALSE)
+
+rule(sprintf("NOMINAL VS REAL AT FIVE YEARS -- edges indexed at %.1f%%/yr",
+             100 * CPI_ASSUMPTION))
+print(as.data.frame(growth_tbl), row.names = FALSE)
+cat("\nThreshold drift is the part of the change that is the yardstick",
+    "\nmoving rather than credit unions changing size.\n")
+
+rule("MOVEMENT")
+for (h in H_SET)
+  cat(sprintf("  %-7s  E[down] %6.1f   E[same] %8.1f   E[up] %6.1f\n",
+              H_LAB[as.character(h)],
+              sum(inst[[paste0("p_down_h", h)]]),
+              sum(inst[[paste0("p_same_h", h)]]),
+              sum(inst[[paste0("p_up_h", h)]])))
+cat("\n  Named as moving up at 5yr: ", sum(movers$h == 20),
+    "\n  Named on the down-risk list:", sum(down_risk$h == 20),
+    "\n  (assignment is by forecast size and cannot move an institution",
+    "\n   downward, so downward risk is published as its own list)\n")
+
+rule("CONFIDENCE OF THE FIVE-YEAR ASSIGNMENT")
+print(inst_out %>% count(conf_5y) %>%
+        mutate(pct = round(100 * n / sum(n), 1)) %>% as.data.frame(),
+      row.names = FALSE)
+
+rule("BY REGION AND CHARTER -- five years")
+print(cell_counts %>% filter(h == 20) %>%
+        group_by(Region = REG_LAB[as.character(region)],
+                 Charter = CT_LAB[as.character(cu_type)]) %>%
+        summarise(Today = first(n_now), `5yr` = round(sum(fcst_exact), 1),
+                  .groups = "drop") %>% as.data.frame(), row.names = FALSE)
+
+rule("VALIDATION -- five-year backtest")
+print(as.data.frame(val_counts), row.names = FALSE)
+cat("\n")
+print(as.data.frame(val_dir), row.names = FALSE)
+
+rule("THE THREE CAVEATS THAT MUST TRAVEL WITH THESE NUMBERS")
+cat("  1. No mergers. The total is held fixed. Realised exit is ~3.6%/yr,\n",
+    "    about a sixth over five years. These are not population counts.\n")
+cat(sprintf("  2. %s over-counts by %.0f%% out of sample at five years.\n",
+            CAT_PRETTY[CAT_LABELS[N_CAT]],
+            count_tab$pct[count_tab$h == 20 & count_tab$cat == CAT_LABELS[N_CAT]]))
+cat(sprintf(paste0("  3. Downward movement under-predicted beyond one year",
+                   "\n     (down ratio %.2f at five years; 1.00 would be perfect).\n"),
+            dir_tab$down_ratio[dir_tab$h == 20]))
+
+## ---------------------------------------------------------------------
+## [27.15] Tie-out
+## ---------------------------------------------------------------------
+rule("TIE-OUT")
+cat("  cohort             ", nrow(inst_out), "\n")
+cat("  Total tab, 5yr     ", round(sum(counts$h20), 1), "\n")
+cat("  Institutions tab   ", nrow(inst_tab), "\n")
+cat("  assigned 5yr       ", sum(table(inst_out$cat_5y)), "\n")
+cat("  region x charter   ", round(sum(cell_counts$fcst_exact[cell_counts$h == 20]), 1), "\n")
 stopifnot(abs(sum(counts$h20) - nrow(inst_out)) < 0.5,
-          nrow(inst_tab) == nrow(inst_out))
-cat("\nWorkbook written:", OUT, "\n")
+          nrow(inst_tab) == nrow(inst_out),
+          abs(sum(cell_counts$fcst_exact[cell_counts$h == 20]) -
+                nrow(inst_out)) < 1e-6)
+cat("\nWorkbook written:", normalizePath(OUT), "\n")

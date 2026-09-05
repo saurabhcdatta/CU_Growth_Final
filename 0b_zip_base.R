@@ -14,11 +14,17 @@
 ##
 ## HOW IT WORKS WITHOUT ANY OF THEM
 ##   A ZIP entry needs the deflate-compressed bytes and a CRC32 of the
-##   uncompressed bytes. memCompress(x, "gzip") produces both: a gzip
-##   stream is a 10-byte header, the raw deflate data, then a trailer
-##   holding the CRC32 and the original size. Strip the header and
-##   trailer and you have exactly what a ZIP entry stores, computed in C
-##   rather than in an R loop.
+##   uncompressed bytes. Both come free from a gzip stream: 10-byte
+##   header, raw deflate payload, then a trailer holding the CRC32 and
+##   the original size. Strip header and trailer and you have exactly
+##   what a ZIP entry stores, computed in C rather than in an R loop.
+##
+##   NOTE, AND THIS COST A ROUND OF DEBUGGING: use gzfile(), NOT
+##   memCompress(x, "gzip"). Despite the argument name, memCompress uses
+##   zlib compress2 and emits a ZLIB stream -- 2-byte header, deflate
+##   data, 4-byte Adler-32 -- not a gzip container. Treating it as gzip
+##   gives the wrong payload boundaries and an Adler checksum where a
+##   CRC32 belongs, and Excel rejects the workbook as corrupt.
 ##
 ## The output is a normal ZIP. Excel does not care which tool made it.
 ## =====================================================================
@@ -36,11 +42,50 @@ le4 <- function(x) {
 }
 
 ## ---------------------------------------------------------------------
+## deflate_and_crc -- raw deflate payload and CRC32, via a real gzip file
+##
+## The header length is derived from the FLG byte rather than assumed to
+## be 10, so an implementation that writes a filename or extra field into
+## the header cannot silently shift every entry by a few bytes.
+## ---------------------------------------------------------------------
+deflate_and_crc <- function(dat) {
+  tmp <- tempfile(fileext = ".gz")
+  on.exit(unlink(tmp), add = TRUE)
+
+  zz <- gzfile(tmp, "wb", compression = 6)
+  writeBin(dat, zz)
+  close(zz)
+
+  gz <- readBin(tmp, "raw", file.info(tmp)$size)
+  n  <- length(gz)
+  if (n < 18 || gz[1] != as.raw(0x1f) || gz[2] != as.raw(0x8b) ||
+      gz[3] != as.raw(0x08))
+    stop("gzfile did not produce a gzip stream")
+
+  flg <- as.integer(gz[4])
+  pos <- 11L
+  if (bitwAnd(flg, 4L)) {                       # FEXTRA
+    xlen <- as.integer(gz[pos]) + 256L * as.integer(gz[pos + 1L])
+    pos <- pos + 2L + xlen
+  }
+  if (bitwAnd(flg, 8L)) {                       # FNAME
+    while (gz[pos] != as.raw(0)) pos <- pos + 1L
+    pos <- pos + 1L
+  }
+  if (bitwAnd(flg, 16L)) {                      # FCOMMENT
+    while (gz[pos] != as.raw(0)) pos <- pos + 1L
+    pos <- pos + 1L
+  }
+  if (bitwAnd(flg, 2L)) pos <- pos + 2L         # FHCRC
+
+  list(comp = if (n - 8L >= pos) gz[pos:(n - 8L)] else raw(0),
+       crc  = gz[(n - 7L):(n - 4L)])
+}
+
+## ---------------------------------------------------------------------
 ## zip_base -- write `files` (paths relative to `root`) into `out`
 ##
-## Stored (method 0) for empty files, deflate (method 8) otherwise. An
-## empty gzip stream contains no deflate payload to extract, and a
-## zero-length stored entry is what the format expects there anyway.
+## Stored (method 0) for empty files, deflate (method 8) otherwise.
 ## ---------------------------------------------------------------------
 zip_base <- function(files, root, out) {
   if (file.exists(out)) unlink(out)
@@ -57,11 +102,9 @@ zip_base <- function(files, root, out) {
     dat  <- if (sz > 0) readBin(path, "raw", sz) else raw(0)
 
     if (length(dat) > 0) {
-      gz <- memCompress(dat, "gzip")
-      ng <- length(gz)
-      ## 10-byte header, 8-byte trailer (CRC32 then ISIZE, little-endian)
-      comp   <- gz[11:(ng - 8)]
-      crc    <- gz[(ng - 7):(ng - 4)]
+      dc     <- deflate_and_crc(dat)
+      comp   <- dc$comp
+      crc    <- dc$crc
       method <- 8L
     } else {
       comp   <- raw(0)
@@ -279,7 +322,29 @@ xlsx_write <- function(SH, out_path) {
   if (!file.exists(out_path))
     stop("zip_base wrote nothing. Parts are in: ", BUILD)
 
-  cat("  zip_base ->", n, "parts\n")
+  ## Self-check. R's internal unzip reads the central directory and
+  ## verifies CRCs on extract, so if this round-trips the archive is
+  ## structurally sound and Excel will not reject it as corrupt. Far
+  ## better to fail here than in front of the field team.
+  chk <- tryCatch(utils::unzip(out_path, list = TRUE),
+                  error = function(e) NULL, warning = function(w) NULL)
+  if (is.null(chk) || nrow(chk) != n)
+    stop("zip_base produced an archive R cannot read back. Parts are in: ",
+         BUILD)
+
+  tdir <- file.path(tempdir(), "xlsxverify")
+  unlink(tdir, recursive = TRUE); dir.create(tdir)
+  ok <- tryCatch({
+    utils::unzip(out_path, files = "xl/workbook.xml", exdir = tdir)
+    identical(readBin(file.path(tdir, "xl", "workbook.xml"), "raw",
+                      file.info(file.path(tdir, "xl", "workbook.xml"))$size),
+              readBin(file.path(BUILD, "xl", "workbook.xml"), "raw",
+                      file.info(file.path(BUILD, "xl", "workbook.xml"))$size))
+  }, error = function(e) FALSE, warning = function(w) FALSE)
+  if (!isTRUE(ok))
+    stop("zip_base entries do not round-trip. Parts are in: ", BUILD)
+
+  cat("  zip_base ->", n, "parts, verified\n")
   cat("  wrote", normalizePath(out_path), "-",
       round(file.size(out_path) / 1024^2, 2), "MB\n")
   invisible(out_path)
