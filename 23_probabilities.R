@@ -99,6 +99,92 @@ RECENT_FROM  <- 2022             # first origin year counted as post-surge
 ## "baseline" uses everything.
 SCENARIO <- "baseline"          # "baseline" | "shock" | "calm"
 
+## ---------------------------------------------------------------------
+## REAL TERMS -- the published basis
+##
+## The category edges are fixed nominal dollars that have never been
+## indexed, so a forecast on nominal edges mixes two things: credit unions
+## growing, and the definition of each size band eroding. Holding the edges
+## constant in REAL terms separates them and is the more meaningful
+## economic statement.
+##
+## What this does: the edges are inflated at CPI_ASSUMPTION a year, which
+## is arithmetically the same as deflating each institution's forecast
+## assets to 2026 dollars. Category membership is then "large relative to
+## the 2026 economy" rather than "above a number set at some past date".
+##
+## TWO THINGS FOR THE METHOD TAB.
+##
+## 1. The $10B line is STATUTORY and not indexed -- CFPB supervisory
+##    authority and stress-testing tiers attach to the nominal figure. For
+##    a supervisory planning question the nominal count is the relevant
+##    one. Both are produced below; which one leads is an editorial
+##    decision and should be stated as one.
+##
+## 2. The deflation is approximate. The growth pools are NOMINAL log
+##    growth drawn from a period averaging roughly 2.5% inflation, so
+##    deflating at 2.5% recovers real growth on average. Under
+##    GROWTH_BASIS = "post_surge" the pools come from 2022-24 windows,
+##    where inflation ran well above that, so this UNDER-corrects. The
+##    clean version deflates each historical window by its realised CPI
+##    before the pools are built, which needs a CPI series this pipeline
+##    does not currently load.
+## THREE INTERNALLY CONSISTENT CONFIGURATIONS. Pick one.
+##
+##   "nominal"     nominal growth pools, fixed statutory edges.
+##                 Answers: how many cross the $10B line as written.
+##
+##   "real_approx" nominal growth pools, edges indexed forward at
+##                 CPI_ASSUMPTION. Approximate, because the pools embed
+##                 whatever inflation their own windows contained. Fine
+##                 when the pools span a long period averaging near the
+##                 assumption; WRONG under GROWTH_BASIS = "post_surge",
+##                 whose windows carry 4-8% inflation.
+##
+##   "real_exact"  each historical window's growth is deflated by its OWN
+##                 realised CPI, then compared against unindexed edges.
+##                 Both sides in the same dollars. This is the correct
+##                 real-terms calculation and the one to publish.
+##
+## DO NOT deflate history and index the edges as well. They are the same
+## correction and applying both double-counts it. The guard below enforces
+## this rather than trusting anyone to remember.
+PRICE_BASIS    <- "real_exact"    # "nominal" | "real_approx" | "real_exact"
+CPI_ASSUMPTION <- 0.025           # forward rate, used by "real_approx" only
+
+REAL_TERMS <- PRICE_BASIS != "nominal"   # kept for downstream references
+
+## ---------------------------------------------------------------------
+## CPI-U, annual averages, 1982-84 = 100.
+##
+## VERIFY 2025 AND 2026 AGAINST BLS BEFORE PUBLISHING. Those two are
+## estimates; every year through 2024 is the published annual average.
+## The 2026 value in particular sets the base year for every deflated
+## figure in the workbook.
+## ---------------------------------------------------------------------
+CPI <- c(`2005` = 195.300, `2006` = 201.600, `2007` = 207.342,
+         `2008` = 215.303, `2009` = 214.537, `2010` = 218.056,
+         `2011` = 224.939, `2012` = 229.594, `2013` = 232.957,
+         `2014` = 236.736, `2015` = 237.017, `2016` = 240.007,
+         `2017` = 245.120, `2018` = 251.107, `2019` = 255.657,
+         `2020` = 258.811, `2021` = 270.970, `2022` = 292.655,
+         `2023` = 304.702, `2024` = 313.689,
+         `2025` = 321.000,                    # ESTIMATE -- verify
+         `2026` = 328.000)                    # ESTIMATE -- verify
+
+## Quarterly log CPI on the panel's own index. Annual averages are centred
+## at mid-year, so they are placed at year + 0.5 and interpolated to
+## quarter midpoints.
+q_time <- START_YEAR + (seq_len(N_Q) - 1) %/% 4 +
+          ((seq_len(N_Q) - 1) %% 4 + 0.5) / 4
+LOGCPI <- approx(as.numeric(names(CPI)) + 0.5, log(CPI),
+                 xout = q_time, rule = 2)$y
+
+## Realised inflation over the last five years, as a sanity check on the
+## series and as the number the Method tab should quote.
+cat(sprintf("CPI check: %.1f%% a year over the last 5 years\n",
+            100 * (exp((LOGCPI[N_Q] - LOGCPI[N_Q - 20]) / 5) - 1)))
+
 ## Optional bucket calibration -- see [23.6]. Off by default.
 BUCKET_CALIB <- FALSE
 
@@ -116,8 +202,22 @@ BUCKET_CALIB <- FALSE
 MIN_POOL <- 60
 P_FLOOR  <- 1e-6
 
-cat("Spec:", SPEC, " basis:", GROWTH_BASIS,
+cat("Spec:", SPEC, " growth:", GROWTH_BASIS, " prices:", PRICE_BASIS,
     " weighted:", WEIGHTED, " scenario:", SCENARIO, "\n")
+
+stopifnot(PRICE_BASIS %in% c("nominal", "real_approx", "real_exact"))
+
+## Combining a post-surge growth basis with a real price basis strips the
+## same price effect twice: the 2022-24 windows are low-growth largely
+## BECAUSE inflation was high, and deflating them removes that again. The
+## run will complete, but the resulting forecast is of sustained real
+## contraction across the industry and should not be published without
+## that being the headline.
+if (PRICE_BASIS != "nominal" && GROWTH_BASIS == "post_surge")
+  warning("post_surge growth with a real price basis double-corrects for ",
+          "inflation. Use GROWTH_BASIS = 'full' or 'pre2015' with real ",
+          "prices, or keep post_surge and PRICE_BASIS = 'nominal'.",
+          call. = FALSE, immediate. = TRUE)
 
 ## ---------------------------------------------------------------------
 ## [23.2] The forecast set -- all 4,202
@@ -178,6 +278,17 @@ build_pools <- function(h) {
   us  <- feat[[paste0("usable_surv_h", h)]]
   d_h <- feat[us, ]
   d_h$dy <- d_h[[paste0("dy_h", h)]]
+
+  ## REAL GROWTH: subtract the inflation each window actually experienced,
+  ## not an average. A 2018Q1 origin's five-year window covers 2018-2023
+  ## and carries roughly 20% cumulative CPI; a 2010Q1 origin's carries
+  ## about 8%. Using a flat deflator would leave the difference in the
+  ## "real" figures, which is exactly the error the approximate version
+  ## makes under a post-surge growth basis.
+  if (PRICE_BASIS == "real_exact")
+    d_h$dy <- d_h$dy - (LOGCPI[pmin(d_h$q_index + h, N_Q)] -
+                        LOGCPI[d_h$q_index])
+
   d_h <- d_h[!is.na(d_h$dy), ]
 
   ## Scenario: restrict the origins the distribution is learned from
@@ -236,6 +347,8 @@ growth_delta <- function() {
   ## per-quarter log-growth gap, by category, measured at h = 12
   us  <- feat[["usable_surv_h12"]]
   d   <- feat[us, ]; d$dy <- d[["dy_h12"]]
+  if (PRICE_BASIS == "real_exact")
+    d$dy <- d$dy - (LOGCPI[pmin(d$q_index + 12, N_Q)] - LOGCPI[d$q_index])
   d   <- d[!is.na(d$dy), ]
   d$yr <- origin_year(d$q_index)
 
@@ -320,7 +433,11 @@ for (h in H_SET) {
 ## ---------------------------------------------------------------------
 ## [23.4] Probabilities
 ## ---------------------------------------------------------------------
-emp_bucket_probs <- function(pools, cat_k, y_raw) {
+## `edges` defaults to the nominal boundaries. Passing inflated edges is
+## how the real-terms version is produced -- an explicit argument rather
+## than reassigning LOG_EDGE in the global environment, which the earlier
+## sensitivity block did and which is far too easy to leave switched on.
+emp_bucket_probs <- function(pools, cat_k, y_raw, edges = LOG_EDGE) {
   P <- matrix(0, length(y_raw), N_CAT,
               dimnames = list(NULL, CAT_LABELS))
   for (k in sort(unique(cat_k))) {
@@ -328,7 +445,7 @@ emp_bucket_probs <- function(pools, cat_k, y_raw) {
     pl  <- pools[[as.character(k)]]
     Fprev <- rep(0, length(idx))
     for (j in seq_len(N_CAT - 1)) {
-      z  <- LOG_EDGE[j + 1] - y_raw[idx]
+      z  <- edges[j + 1] - y_raw[idx]
       Fk <- pmax(pool_cdf(pl, z), Fprev)     # monotone across edges
       P[idx, j] <- Fk - Fprev
       Fprev <- Fk
@@ -340,9 +457,49 @@ emp_bucket_probs <- function(pools, cat_k, y_raw) {
   P / rowSums(P)
 }
 
+## Edges for each horizon. Real terms inflates them by CPI over the
+## horizon; nominal leaves them alone.
+real_edges <- function(h) {
+  e <- LOG_EDGE + log((1 + CPI_ASSUMPTION) ^ (h / 4))
+  e[1] <- -Inf; e[N_CAT + 1] <- Inf
+  e
+}
+## Edges are indexed only under "real_approx". Under "real_exact" the
+## deflation has already happened on the growth side, so the edges stay
+## where the statute put them.
+EDGES <- lapply(H_SET, function(h)
+  if (PRICE_BASIS == "real_approx") real_edges(h) else LOG_EDGE)
+names(EDGES) <- as.character(H_SET)
+
+## The alternate basis for the sensitivity row: whichever of nominal /
+## real the published run is not.
+EDGES_ALT <- lapply(H_SET, function(h)
+  if (PRICE_BASIS == "real_approx") LOG_EDGE else real_edges(h))
+names(EDGES_ALT) <- as.character(H_SET)
+
+## Both bases are always computed. PROB is the published one; PROB_ALT is
+## the other, kept for the sensitivity row on the Method tab.
 PROB <- lapply(H_SET, function(h)
-  emp_bucket_probs(POOLS[[as.character(h)]], fc$cat_k, fc$y_raw))
+  emp_bucket_probs(POOLS[[as.character(h)]], fc$cat_k, fc$y_raw,
+                   EDGES[[as.character(h)]]))
 names(PROB) <- as.character(H_SET)
+
+PROB_ALT <- lapply(H_SET, function(h)
+  emp_bucket_probs(POOLS[[as.character(h)]], fc$cat_k, fc$y_raw,
+                   EDGES_ALT[[as.character(h)]]))
+names(PROB_ALT) <- as.character(H_SET)
+
+cat("\nPublished basis:", PRICE_BASIS, " growth basis:", GROWTH_BASIS, "\n")
+
+## Real median annual growth by category, five-year horizon. Under
+## "real_exact" these are REAL rates and should be read as such: roughly
+## 3-5% for the larger categories on full history. If any of them is
+## negative, the run is projecting sustained real contraction for that
+## category and that needs saying out loud, not burying in a count.
+cat("\nMedian annual growth by category (h=20), on the published basis:\n")
+print(data.frame(
+  cat = CAT_LABELS,
+  med_ann = round(100 * (exp(sapply(POOLS[["20"]], pool_q, 0.50) * 4/20) - 1), 2)))
 
 ## ---------------------------------------------------------------------
 ## [23.5] Guardrails
@@ -449,9 +606,14 @@ for (h in H_SET) {
   q10 <- qk(0.10)[fc$cat_k]
   q90 <- qk(0.90)[fc$cat_k]
 
-  inst[[paste0("assets_med_h", h)]] <- exp(fc$y_raw + q50)
-  inst[[paste0("assets_p10_h", h)]] <- exp(fc$y_raw + q10)
-  inst[[paste0("assets_p90_h", h)]] <- exp(fc$y_raw + q90)
+  ## Under REAL_TERMS these are stated in 2026 dollars, so they are
+  ## directly comparable with assets_now and with the (unindexed) edges.
+  ## "real_exact" already deflated the growth, so the level is in 2026
+  ## dollars with no further adjustment. "real_approx" deflates here.
+  defl <- if (PRICE_BASIS == "real_approx") (1 + CPI_ASSUMPTION)^(h/4) else 1
+  inst[[paste0("assets_med_h", h)]] <- exp(fc$y_raw + q50) / defl
+  inst[[paste0("assets_p10_h", h)]] <- exp(fc$y_raw + q10) / defl
+  inst[[paste0("assets_p90_h", h)]] <- exp(fc$y_raw + q90) / defl
 
   inst[[paste0("p_down_h", h)]] <-
     rowSums(P * outer(fc$cat_k, seq_len(N_CAT), ">"))
@@ -497,8 +659,46 @@ for (h in H_SET)
 counts <- data.frame(cat = CAT_LABELS, pretty = CAT_PRETTY[CAT_LABELS],
                      now = as.numeric(table(factor(fc$cat_k,
                                                    levels = 1:N_CAT))))
-for (h in H_SET)
+for (h in H_SET) {
   counts[[paste0("h", h)]] <- round(colSums(PROB[[as.character(h)]]), 1)
+  counts[[paste0("alt_h", h)]] <- round(colSums(PROB_ALT[[as.character(h)]]), 1)
+}
+
+## THE PUBLISHED TABLE -- real terms at 1, 3 and 5 years.
+lab_pub <- if (REAL_TERMS) "real" else "nominal"
+lab_alt <- if (REAL_TERMS) "nominal" else "real"
+
+pub_table <- counts %>%
+  transmute(Category = pretty, Today = now,
+            `1 year` = h4, `3 years` = h12, `5 years` = h20,
+            `Change` = round(h20 - now, 1),
+            `Pct` = round(100 * (h20 - now) / pmax(now, 1), 1))
+cat("\n=== PUBLISHED (", lab_pub, " terms) ===\n", sep = "")
+print(as.data.frame(pub_table))
+
+alt_table <- counts %>%
+  transmute(Category = pretty, Today = now,
+            `1 year` = alt_h4, `3 years` = alt_h12, `5 years` = alt_h20,
+            `Change` = round(alt_h20 - now, 1))
+cat("\n=== SENSITIVITY (", lab_alt, " terms) ===\n", sep = "")
+print(as.data.frame(alt_table))
+
+## Side by side at five years, with the split
+cat("\n=== how much of the five-year change is threshold drift ===\n")
+print(counts %>%
+  transmute(Category = pretty, Today = now,
+            real  = if (REAL_TERMS) h20 else alt_h20,
+            nominal = if (REAL_TERMS) alt_h20 else h20) %>%
+  mutate(real_chg = round(real - Today, 1),
+         nominal_chg = round(nominal - Today, 1),
+         threshold_drift = round(nominal - real, 1)) %>%
+  as.data.frame())
+
+## Both bases must still tie to the cohort at every horizon
+for (h in H_SET)
+  stopifnot(abs(sum(PROB[[as.character(h)]]) - nrow(fc)) < 1e-6,
+            abs(sum(PROB_ALT[[as.character(h)]]) - nrow(fc)) < 1e-6)
+cat("\nBoth bases tie to", nrow(fc), "at every horizon.\n")
 
 counts %>%
   mutate(chg_5y = round(h20 - now, 1),
@@ -604,16 +804,12 @@ cat(sprintf("  E[up]   %7.1f\n  E[down] %7.1f\n  ratio   %7.1f : 1\n",
 ## how much of the published movement is nominal.
 CPI_ASSUMPTION <- 0.025
 
-real_counts <- lapply(H_SET, function(h) {
-  infl <- (1 + CPI_ASSUMPTION) ^ (h / 4)
-  LE   <- LOG_EDGE + log(infl)                 # edges move, assets do not
-  LE[1] <- -Inf; LE[N_CAT + 1] <- Inf
-  old_edge <- LOG_EDGE
-  assign("LOG_EDGE", LE, envir = .GlobalEnv)
-  P <- emp_bucket_probs(POOLS[[as.character(h)]], fc$cat_k, fc$y_raw)
-  assign("LOG_EDGE", old_edge, envir = .GlobalEnv)
-  colSums(P)
-})
+## Superseded by [23.4], which computes both bases with an explicit edges
+## argument. Kept as a named object because 27 and the Method tab refer to
+## it, but it is now just a view on what is already computed.
+real_counts <- lapply(H_SET, function(h)
+  colSums(if (REAL_TERMS) PROB[[as.character(h)]]
+          else PROB_ALT[[as.character(h)]]))
 names(real_counts) <- paste0("real_h", H_SET)
 
 nominal_vs_real <- data.frame(
@@ -651,7 +847,11 @@ saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              TRANS = TRANS, counts = counts, cell_counts = cell_counts,
              calib_factors = calib_factors,
              nominal_vs_real = nominal_vs_real, real_counts = real_counts,
-             CPI_ASSUMPTION = CPI_ASSUMPTION,
+             CPI_ASSUMPTION = CPI_ASSUMPTION, REAL_TERMS = REAL_TERMS,
+             PRICE_BASIS = PRICE_BASIS, CPI = CPI, LOGCPI = LOGCPI,
+             EDGES_ALT = EDGES_ALT,
+             PROB_ALT = PROB_ALT, EDGES = EDGES, pub_table = pub_table,
+             alt_table = alt_table,
              SPEC = SPEC, WEIGHTED = WEIGHTED, HALFLIFE = HALFLIFE,
              SCENARIO = SCENARIO, BUCKET_CALIB = BUCKET_CALIB,
              GROWTH_BASIS = GROWTH_BASIS, DELTA = DELTA,
