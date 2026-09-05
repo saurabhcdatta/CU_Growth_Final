@@ -205,6 +205,12 @@ BUCKET_CALIB <- FALSE
 ## institutions beats a thick pool of the wrong ones. The printout below
 ## shows which categories used their own data.
 MIN_POOL <- 20
+
+## Below this many observations, institution-level probabilities are
+## flagged as indicative on the tabs. This does NOT change any number --
+## the counts are unaffected -- it only labels rows whose precision the
+## data cannot support. A7 at h=20 sits here by construction.
+THIN_POOL <- 100
 P_FLOOR  <- 1e-6
 
 cat("Spec:", SPEC, " growth:", GROWTH_BASIS, " prices:", PRICE_BASIS,
@@ -412,6 +418,12 @@ for (h in H_SET) {
     cat   = CAT_LABELS,
     src   = attr(pl, "source"),
     n     = sapply(pl, function(p) p$n),
+    ## Coarsest probability the pool can express. An empirical CDF built on
+    ## n observations can only take values in multiples of 1/n, so a pool
+    ## of 21 produces probabilities in steps of 4.8% -- two institutions
+    ## get identical figures and several get exactly zero. The count is
+    ## still right; the institution-level precision is not.
+    grain = round(100 / sapply(pl, function(p) p$n), 1),
     p_neg = round(100 * sapply(pl, function(p) mean(p$dy < 0)), 1),
     p10   = round(100 * (exp(sapply(pl, pool_q, 0.10) * 4 / h) - 1), 1),
     med   = round(100 * (exp(sapply(pl, pool_q, 0.50) * 4 / h) - 1), 1),
@@ -638,7 +650,31 @@ for (h in H_SET) {
   inst[[paste0("conf_h", h)]] <- cut(
     apply(P, 1, max), c(0, 0.6, 0.8, 1),
     labels = c("weak", "moderate", "strong"), include.lowest = TRUE)
+
+  ## How many observations sit behind THIS institution's probabilities, and
+  ## the resulting granularity. A7 at h=20 has about 20, so its rows carry
+  ## probabilities in ~5% steps. The tab must say so: a supervisor reading
+  ## "0.000" for their credit union should understand that means "none of
+  ## the twenty comparable historical cases went that way", not "we have
+  ## established this cannot happen".
+  n_by_cat <- sapply(pl, function(p) p$n)
+  inst[[paste0("pool_n_h", h)]]  <- n_by_cat[fc$cat_k]
+  inst[[paste0("grain_h", h)]]   <- round(1 / n_by_cat[fc$cat_k], 4)
+  inst[[paste0("thin_h", h)]]    <- n_by_cat[fc$cat_k] < THIN_POOL
 }
+
+## Which institutions carry thin-pool probabilities, and how coarse
+cat("\nThin-pool rows (fewer than", THIN_POOL, "historical observations):\n")
+for (h in H_SET) {
+  th <- inst[[paste0("thin_h", h)]]
+  if (!any(th)) { cat(sprintf("h=%2d  none\n", h)); next }
+  cat(sprintf("h=%2d  %d rows in %s   pool n = %d   steps of %.1f%%\n",
+              h, sum(th),
+              paste(unique(inst$asset_cat_now[th]), collapse = ", "),
+              min(inst[[paste0("pool_n_h", h)]][th]),
+              100 * max(inst[[paste0("grain_h", h)]][th])))
+}
+cat("Counts are unaffected. Flag these rows as indicative on the tabs.\n")
 
 ## How confident are the institution-level calls, by horizon
 for (h in H_SET) {
@@ -835,6 +871,11 @@ print(as.data.frame(nominal_vs_real))
 cat("\nA7 check. Out of fold this category ran +28% to +55% high, and the\n",
     "frozen-cohort track runs +54%. It is 13 institutions and there is no\n",
     "category above it to absorb drift -- 24 handles it explicitly.\n")
+cat("A7 probabilities come from",
+    POOLS[["20"]][["7"]]$n, "historical observations, so they move in steps\n",
+    "of about", round(100 / POOLS[["20"]][["7"]]$n, 1),
+    "percentage points. Repeated values and exact zeros in the\n",
+    "column below are that granularity, not a finding. Label the tab.\n")
 print(inst %>% filter(cat_k == 7) %>%
         transmute(cu_name, assets_now = round(assets_now / 1e9, 2),
                   p_down_h20 = round(p_down_h20, 3),
@@ -864,7 +905,7 @@ saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              SCENARIO = SCENARIO, BUCKET_CALIB = BUCKET_CALIB,
              GROWTH_BASIS = GROWTH_BASIS, DELTA = DELTA,
              PRE_CUTOFF = PRE_CUTOFF, RECENT_FROM = RECENT_FROM,
-             MIN_POOL = MIN_POOL, P_FLOOR = P_FLOOR,
+             MIN_POOL = MIN_POOL, THIN_POOL = THIN_POOL, P_FLOOR = P_FLOOR,
              make_pool = make_pool, pool_cdf = pool_cdf, pool_q = pool_q,
              build_pools = build_pools,
              emp_bucket_probs = emp_bucket_probs, rake = rake),
