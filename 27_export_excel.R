@@ -309,23 +309,51 @@ SH[[length(SH) + 1]] <- mk_sheet(
 ## ---------------------------------------------------------------------
 ## [27.6] Transition matrices
 ## ---------------------------------------------------------------------
-trans_blocks <- lapply(H_SET, function(h) {
-  m <- round(100 * TRANS[[as.character(h)]], 1)
-  df <- data.frame(From = CAT_LABELS, m, check.names = FALSE,
-                   stringsAsFactors = FALSE)
-  list(head = sprintf("%s (%%)", H_LAB[as.character(h)]), df = df,
-       styles = c(S_NORM, rep(S_DEC, N_CAT)))
+## Whole numbers, counted off the Institutions tab: rows are category
+## today, columns the assigned category at the horizon. Row totals equal
+## the Today column of the Total tab, column totals equal that horizon's
+## column. The assignment cannot move an institution downward, so the
+## lower triangle is zero by construction -- the probability of downward
+## movement is on the Down Risk tab, not here.
+trans_int <- lapply(H_SET, function(h) {
+  m <- table(factor(inst_out$asset_cat_now, levels = CAT_LABELS),
+             factor(inst_out[[H_COL[as.character(h)]]], levels = CAT_LABELS))
+  m <- matrix(as.integer(m), N_CAT, N_CAT,
+              dimnames = list(CAT_LABELS, CAT_LABELS))
+  stopifnot(identical(as.integer(rowSums(m)), counts_int$now),
+            identical(as.integer(colSums(m)), counts_int[[paste0("h", h)]]))
+  m
 })
+names(trans_int) <- as.character(H_SET)
+
+trans_blocks <- unlist(lapply(H_SET, function(h) {
+  m  <- trans_int[[as.character(h)]]
+  df <- data.frame(From = CAT_PRETTY[CAT_LABELS], m, check.names = FALSE,
+                   stringsAsFactors = FALSE)
+  names(df)[-1] <- CAT_PRETTY[CAT_LABELS]
+  df$Total <- as.integer(rowSums(m))
+  ## Row percentages, whole numbers, largest-remainder so each row is 100
+  pct <- t(apply(m, 1, function(r)
+    if (sum(r) > 0) apportion(100 * r / sum(r), 100L) else rep(0L, N_CAT)))
+  dfp <- data.frame(From = CAT_PRETTY[CAT_LABELS], pct, check.names = FALSE,
+                    stringsAsFactors = FALSE)
+  names(dfp)[-1] <- CAT_PRETTY[CAT_LABELS]
+  list(
+    list(head = sprintf("%s -- number of institutions", H_LAB[as.character(h)]),
+         df = df, styles = c(S_NORM, rep(S_INT, N_CAT + 1))),
+    list(head = sprintf("%s -- share of row (%%)", H_LAB[as.character(h)]),
+         df = dfp, styles = c(S_NORM, rep(S_INT, N_CAT))))
+}), recursive = FALSE)
 
 SH[[length(SH) + 1]] <- mk_sheet(
   "Transitions", "Category transition probabilities",
-  "Row = category today, column = category at the horizon",
+  "Row = category today, column = assigned category at the horizon",
   notes = c(
-    "Each row is the average probability vector of the institutions starting in that category. It is a summary of institution-level probabilities, not a fitted matrix.",
-    "That is why the matrices can be cut by region and charter without estimating anything separately, and why the five-year matrix is NOT the one-year matrix cubed -- each horizon is estimated directly.",
-    "Rows sum to 100 because no institution leaves the cohort."),
+    "Whole numbers of institutions, counted off the Institutions tab. Row totals are today's counts; column totals are the horizon's counts on the Total tab.",
+    "Institutions are assigned by forecast size, which cannot place an institution below its current category. Expected downward movement is on the Down Risk tab.",
+    "Each horizon is estimated directly; the five-year table is NOT the one-year table applied five times."),
   blocks = trans_blocks,
-  cols = col_widths(list(c(1, 1, 18), c(2, 8, 14))))
+  cols = col_widths(list(c(1, 1, 18), c(2, 9, 14))))
 
 ## ---------------------------------------------------------------------
 ## [27.7] Region x charter tabs
@@ -345,10 +373,19 @@ for (i in seq_len(nrow(cells))) {
   stopifnot(all(colSums(d[, c("h4", "h12", "h20")]) == n_cell))
 
   mv <- movers %>% filter(h == 20, region == rg, cu_type == ct) %>%
+    left_join(inst_out %>%
+                select(join_number, cat_1y, assets_med_1y,
+                       cat_3y, assets_med_3y),
+              by = "join_number") %>%
     arrange(desc(assets_now_m)) %>%
-    transmute(`Credit union` = cu_name, From = CAT_PRETTY[from],
-              To = CAT_PRETTY[to], `Assets ($M)` = assets_now_m,
-              `Median 5yr ($M)` = med_m, Probability = p_assign)
+    transmute(`Credit union` = cu_name, Today = CAT_PRETTY[from],
+              `Assets ($M)` = assets_now_m,
+              `1yr` = CAT_PRETTY[cat_1y],
+              `Median 1yr ($M)` = round(assets_med_1y / 1e6, 1),
+              `3yr` = CAT_PRETTY[cat_3y],
+              `Median 3yr ($M)` = round(assets_med_3y / 1e6, 1),
+              `5yr` = CAT_PRETTY[to],
+              `Median 5yr ($M)` = med_m, `P(5yr)` = p_assign)
 
   SH[[length(SH) + 1]] <- mk_sheet(
     nm, paste(REG_LAB[as.character(rg)], "-", CT_LAB[as.character(ct)]),
@@ -360,8 +397,9 @@ for (i in seq_len(nrow(cells))) {
       list(head = "Counts by category", df = wide,
            styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT)),
       list(head = "Institutions changing category by five years", df = mv,
-           styles = c(S_NORM, S_NORM, S_NORM, S_DEC, S_DEC, S_DEC))),
-    cols = col_widths(list(c(1, 1, 38), c(2, 7, 16))))
+           styles = c(S_NORM, S_NORM, S_INT, S_NORM, S_INT, S_NORM, S_INT,
+                      S_NORM, S_INT, S_DEC))),
+    cols = col_widths(list(c(1, 1, 38), c(2, 10, 16))))
 }
 
 length(SH)
