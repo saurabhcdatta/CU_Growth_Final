@@ -379,6 +379,8 @@ inst_out <- inst %>%
     ## union will be read as a claim rather than as an absence of cases.
     pool_n_5y = pool_n_h20,
     thin_5y = thin_h20,
+    assets_med_1y = assets_med_h4,
+    assets_med_3y = assets_med_h12,
     assets_med_5y = assets_med_h20,
     assets_p10_5y = assets_p10_h20,
     assets_p90_5y = assets_p90_h20,
