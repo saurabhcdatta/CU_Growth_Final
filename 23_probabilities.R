@@ -604,6 +604,94 @@ if (BUCKET_CALIB) {
 }
 
 ## ---------------------------------------------------------------------
+## [23.6b] A7-ONLY CALIBRATION -- the correction that is safe to apply
+##
+## The backtest at [25.5] found the $10B-and-over count running +19%, +50%
+## and +42% high at the three horizons, reproducing the cross-validation
+## finding in both sign and rough size. Every other category came in
+## within about 5%.
+##
+## That is why BUCKET_CALIB (full-matrix raking, [23.6]) must stay OFF and
+## this block exists instead. Raking corrects all seven categories and
+## iterates; because six of them need no correction, it destroys the
+## within-row shape. Observed when it was switched on: A5 more than
+## doubled, A4 fell a third, and A7 institutions at $10.2B showed a
+## downward probability of 0.804 alongside a median forecast of $15B --
+## two statements from the same distribution that cannot both be true.
+##
+## This scales ONLY the A7 column, once, then rescales each row's
+## remaining six categories proportionally so the row still sums to one.
+## A1-A6 keep their relative shape exactly; only the mass reallocated out
+## of A7 moves. The cohort total is unchanged.
+##
+## Factors are actual/predicted ratios for A7 from the backtest. The
+## values below are single-origin estimates from [25.5]. Block [25.8b]
+## re-derives them across several origins and prints a paste-ready line --
+## use THAT, and quote its range as the uncertainty on the correction.
+## Re-derive whenever 25 runs on a refreshed panel; these are properties
+## of a data vintage, not constants of the method.
+##
+## If [25.8b] shows the range straddling 1.0 at a horizon, the bias is not
+## established there and that factor should be set to 1.
+## ---------------------------------------------------------------------
+A7_ONLY_CALIB <- TRUE
+A7_FACTORS    <- c("4" = 0.839, "12" = 0.667, "20" = 0.702)
+
+if (A7_ONLY_CALIB) {
+  for (h in H_SET) {
+    hh <- as.character(h)
+    P  <- PROB[[hh]]
+    f  <- A7_FACTORS[hh]
+    if (is.na(f)) next
+
+    before <- sum(P[, N_CAT])
+    P[, N_CAT] <- P[, N_CAT] * f
+    keep <- seq_len(N_CAT - 1)
+    rs   <- rowSums(P[, keep, drop = FALSE])
+    ## Guard the degenerate row: an institution with essentially all its
+    ## mass in A7 has nothing to rescale, so leave it alone.
+    ok <- rs > 1e-12
+    P[ok, keep] <- P[ok, keep] * (1 - P[ok, N_CAT]) / rs[ok]
+    P[!ok, N_CAT] <- 1
+
+    PROB[[hh]] <- P
+    cat(sprintf("  h=%2d  A7 %.1f -> %.1f  (factor %.3f)\n",
+                h, before, sum(P[, N_CAT]), f))
+  }
+  cat("A7-only calibration APPLIED. Say so on the Method tab.\n")
+} else {
+  cat("A7-only calibration NOT applied. A7 is published uncorrected and\n",
+      "the backtest says it runs about 40% high at five years.\n")
+}
+
+## Rows and totals must survive the correction
+for (h in H_SET) {
+  P <- PROB[[as.character(h)]]
+  stopifnot(all(abs(rowSums(P) - 1) < 1e-9),
+            abs(sum(P) - nrow(fc)) < 1e-6, all(is.finite(P)))
+}
+cat("Rows still sum to 1; total still", nrow(fc), "at every horizon.\n")
+
+## ---- how close is A6 to the line, in dollars -------------------------
+##
+## The A7 forecast is almost entirely A6 institutions crossing $10B, not
+## the incumbents growing. At the A6 median growth rate an institution
+## needs the assets below to reach $10B by the five-year horizon. If the
+## count looks implausible, this is the table that settles it: either the
+## institutions are there or they are not.
+a6_med <- pool_q(POOLS[["20"]][["6"]], 0.50)
+need   <- 10e9 / exp(a6_med)
+cat(sprintf("\nAt A6 median growth (%.1f%%/yr) an institution needs $%.2fB today\n",
+            100 * (exp(a6_med * 4 / 20) - 1), need / 1e9))
+print(fc %>% filter(cat_k == 6) %>%
+        mutate(band = cut(assets_now / 1e9,
+                          c(0, need / 2e9, need / 1e9, 10),
+                          labels = c("far below", "within reach",
+                                     "at or above threshold"),
+                          include.lowest = TRUE)) %>%
+        count(band) %>% as.data.frame())
+
+## ---------------------------------------------------------------------
 ## [23.7] Institution-level output
 ##
 ## What the regional tabs need. The median forecast asset level is the
@@ -843,7 +931,8 @@ for (h in H_SET) {
 if (nest_ok) {
   cat("\nNesting check passed: $20B+ <= $15B+ <= $10B+ at every horizon.\n")
 } else {
-  cat("\nNesting check FAILED -- see above.\n")
+  cat("\nNesting check FAILED -- see above. Do not publish the",
+      "supplementary thresholds until this reconciles.\n")
 }
 
 ## Who they are, at five years. The named list matters more than the count
@@ -1025,6 +1114,7 @@ saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              alt_table = alt_table,
              SPEC = SPEC, WEIGHTED = WEIGHTED, HALFLIFE = HALFLIFE,
              SCENARIO = SCENARIO, BUCKET_CALIB = BUCKET_CALIB,
+             A7_ONLY_CALIB = A7_ONLY_CALIB, A7_FACTORS = A7_FACTORS,
              GROWTH_BASIS = GROWTH_BASIS, DELTA = DELTA,
              PRE_CUTOFF = PRE_CUTOFF, RECENT_FROM = RECENT_FROM,
              MIN_POOL = MIN_POOL, THIN_POOL = THIN_POOL, P_FLOOR = P_FLOOR,
