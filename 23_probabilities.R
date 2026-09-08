@@ -635,28 +635,53 @@ if (BUCKET_CALIB) {
 ## established there and that factor should be set to 1.
 ## ---------------------------------------------------------------------
 A7_ONLY_CALIB <- TRUE
-A7_FACTORS    <- c("4" = 0.839, "12" = 0.667, "20" = 0.702)
+
+## WHO GETS SCALED. The over-count is in CROSSINGS -- A6 institutions
+## projected into A7 -- not in incumbents. Scaling every row's A7
+## probability (the original version of this block) told Navy Federal at
+## $204B it had a one-in-three chance of being under $10B in five years,
+## and pushed the $15B+ count BELOW today's at three years. Neither is a
+## statement about the world; both are artefacts of applying a crossing
+## bias to institutions that are not crossing anything.
+##
+##   "entrants" -- scale A7 probability only for institutions NOT in A7
+##                 today; incumbents keep their raw (small) exit risk.
+##                 Factors must then be ENTRANT factors from [25.8b]:
+##                 actual entrants / predicted entrant mass.
+##   "all"      -- the original behaviour. Factors are whole-category
+##                 actual/predicted. Kept for comparison only.
+##
+## The two factor sets are not interchangeable. An "all" factor applied to
+## entrants only under-corrects; an entrant factor applied to all rows
+## over-corrects. [25.8b] prints both, labelled.
+A7_FACTOR_SCOPE <- "entrants"
+A7_FACTORS      <- c("4" = 0.839, "12" = 0.667, "20" = 0.702)  # REPLACE with entrant factors from [25.8b]
 
 if (A7_ONLY_CALIB) {
+  ent <- if (A7_FACTOR_SCOPE == "entrants") fc$cat_k < N_CAT else
+           rep(TRUE, nrow(fc))
+  cat(sprintf("Scope: %s  (%d rows scaled, %d incumbents left alone)\n",
+              A7_FACTOR_SCOPE, sum(ent), sum(!ent)))
   for (h in H_SET) {
     hh <- as.character(h)
     P  <- PROB[[hh]]
     f  <- A7_FACTORS[hh]
     if (is.na(f)) next
 
-    before <- sum(P[, N_CAT])
-    P[, N_CAT] <- P[, N_CAT] * f
+    b_inc <- sum(P[!ent, N_CAT]); b_ent <- sum(P[ent, N_CAT])
+    P[ent, N_CAT] <- P[ent, N_CAT] * f
     keep <- seq_len(N_CAT - 1)
     rs   <- rowSums(P[, keep, drop = FALSE])
-    ## Guard the degenerate row: an institution with essentially all its
-    ## mass in A7 has nothing to rescale, so leave it alone.
-    ok <- rs > 1e-12
+    ## Rescale the other six categories only on rows that were touched.
+    ## Guard the degenerate row with no mass outside A7.
+    ok <- ent & rs > 1e-12
     P[ok, keep] <- P[ok, keep] * (1 - P[ok, N_CAT]) / rs[ok]
-    P[!ok, N_CAT] <- 1
+    P[ent & !ok, N_CAT] <- 1
 
     PROB[[hh]] <- P
-    cat(sprintf("  h=%2d  A7 %.1f -> %.1f  (factor %.3f)\n",
-                h, before, sum(P[, N_CAT]), f))
+    cat(sprintf("  h=%2d  A7 %.1f -> %.1f   incumbents %.1f -> %.1f   entrants %.1f -> %.1f  (factor %.3f)\n",
+                h, b_inc + b_ent, sum(P[, N_CAT]),
+                b_inc, sum(P[!ent, N_CAT]), b_ent, sum(P[ent, N_CAT]), f))
   }
   cat("A7-only calibration APPLIED. Say so on the Method tab.\n")
 } else {
@@ -889,13 +914,28 @@ a7_factor <- function(h) {
   if (!length(f) || !is.finite(f)) 1 else f
 }
 
+## Same scope rule as [23.6b]: under "entrants" only institutions BELOW the
+## level today are scaled -- an institution already above $15B keeps its
+## raw probability of staying there. Under "all" every row is scaled.
+## Applying the A7 crossing factor to $15B/$20B crossings assumes the
+## crossing bias is the same at those levels; it is an assumption, and the
+## Total tab note says these are rounded estimates.
+count_above <- function(h, L) {
+  p <- p_above(h, L)
+  f <- a7_factor(h)
+  sc <- if (A7_ONLY_CALIB && A7_FACTOR_SCOPE == "entrants")
+          fc$assets_now < L else rep(TRUE, nrow(fc))
+  p[sc] <- p[sc] * f
+  sum(p)
+}
+
 extra <- lapply(EXTRA_THRESHOLDS, function(L) {
   data.frame(threshold = L,
              label = paste0("$", format(L / 1e9, trim = TRUE), "B and over"),
              now = sum(fc$assets_now >= L),
-             h4  = round(sum(p_above(4,  L)) * a7_factor(4),  1),
-             h12 = round(sum(p_above(12, L)) * a7_factor(12), 1),
-             h20 = round(sum(p_above(20, L)) * a7_factor(20), 1))
+             h4  = round(count_above(4,  L), 1),
+             h12 = round(count_above(12, L), 1),
+             h20 = round(count_above(20, L), 1))
 })
 extra <- bind_rows(extra)
 
@@ -1121,6 +1161,7 @@ saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              SPEC = SPEC, WEIGHTED = WEIGHTED, HALFLIFE = HALFLIFE,
              SCENARIO = SCENARIO, BUCKET_CALIB = BUCKET_CALIB,
              A7_ONLY_CALIB = A7_ONLY_CALIB, A7_FACTORS = A7_FACTORS,
+             A7_FACTOR_SCOPE = A7_FACTOR_SCOPE,
              GROWTH_BASIS = GROWTH_BASIS, DELTA = DELTA,
              PRE_CUTOFF = PRE_CUTOFF, RECENT_FROM = RECENT_FROM,
              MIN_POOL = MIN_POOL, THIN_POOL = THIN_POOL, P_FLOOR = P_FLOOR,

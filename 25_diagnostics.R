@@ -38,9 +38,48 @@ setwd("S:/Projects/Credit_Union_Growth_Forecast/Data")
 ## prb  <- readRDS("panel_probs.rds"); list2env(prb,  .GlobalEnv)
 ## asg  <- readRDS("panel_assign.rds"); list2env(asg, .GlobalEnv)
 
-stopifnot(exists("feat"), exists("make_pool"), exists("pool_cdf"),
-          exists("emp_bucket_probs"), exists("apportion"),
-          exists("assign_cut"))
+stopifnot(exists("feat"), exists("make_pool"), exists("pool_q"),
+          exists("emp_bucket_probs"))
+
+## apportion() and assign_cut() come from script 24. Defined here too so
+## the backtest can run without 24 having been executed in this session --
+## a diagnostic should not depend on a downstream script. If 24 is loaded,
+## its versions are used and these are skipped.
+if (!exists("apportion"))
+  apportion <- function(x, total) {
+    base <- floor(x)
+    rem  <- total - sum(base)
+    if (rem > 0) {
+      ord <- order(x - base, decreasing = TRUE)
+      base[ord[seq_len(rem)]] <- base[ord[seq_len(rem)]] + 1
+    }
+    if (rem < 0) {
+      ord <- order(x - base)
+      base[ord[seq_len(-rem)]] <- base[ord[seq_len(-rem)]] - 1
+    }
+    base
+  }
+
+if (!exists("assign_cut"))
+  assign_cut <- function(med, target, tie1, tie2) {
+    n <- length(med)
+    stopifnot(sum(target) == n)
+    ord <- order(med, tie1, tie2, decreasing = TRUE)
+    lab <- rep(NA_integer_, n); pos <- 1
+    for (k in rev(seq_len(N_CAT))) {
+      if (target[k] == 0) next
+      lab[ord[pos:(pos + target[k] - 1)]] <- k
+      pos <- pos + target[k]
+    }
+    stopifnot(!anyNA(lab))
+    lab
+  }
+
+## calib_factors comes from [23.6]. If 23 was not run in this session the
+## CV-vs-backtest comparison at [25.5] is skipped rather than failing.
+HAVE_CALIB <- exists("calib_factors") && is.data.frame(calib_factors)
+if (!HAVE_CALIB)
+  message("calib_factors not found -- [25.5] will skip the CV comparison.")
 
 ## ---------------------------------------------------------------------
 ## [25.1] Backtest design
@@ -184,19 +223,24 @@ count_tab %>% group_by(h) %>%
 bt_factor <- count_tab %>%
   transmute(h, cat, bt_factor = round(actual / pmax(pred, 1e-9), 3))
 
-compare_bias <- bt_factor %>%
-  inner_join(calib_factors %>% rename(cv_factor = f), by = c("h", "cat")) %>%
-  mutate(cv_factor = round(cv_factor, 3),
-         agree = sign(1 - bt_factor) == sign(1 - cv_factor))
+compare_bias <- NULL
+if (HAVE_CALIB) {
+  compare_bias <- bt_factor %>%
+    inner_join(calib_factors %>% rename(cv_factor = f), by = c("h", "cat")) %>%
+    mutate(cv_factor = round(cv_factor, 3),
+           agree = sign(1 - bt_factor) == sign(1 - cv_factor))
 
-as.data.frame(compare_bias)
+  print(as.data.frame(compare_bias))
 
-cat("\nCategories where backtest and CV bias agree in direction:\n")
-compare_bias %>% group_by(cat) %>%
-  summarise(n_agree = sum(agree), n = n(),
-            mean_bt = round(mean(bt_factor), 3),
-            mean_cv = round(mean(cv_factor), 3), .groups = "drop") %>%
-  as.data.frame()
+  cat("\nCategories where backtest and CV bias agree in direction:\n")
+  print(compare_bias %>% group_by(cat) %>%
+    summarise(n_agree = sum(agree), n = n(),
+              mean_bt = round(mean(bt_factor), 3),
+              mean_cv = round(mean(cv_factor), 3), .groups = "drop") %>%
+    as.data.frame())
+} else {
+  print(as.data.frame(bt_factor))
+}
 
 ## ---------------------------------------------------------------------
 ## [25.6] Direction -- the comparison that matters most
@@ -295,6 +339,81 @@ for (r in BT_RES) {
 }
 
 ## ---------------------------------------------------------------------
+## [25.8b] A7 CORRECTION FACTORS, over several origins
+##
+## The factors used by [23.6b] are actual/predicted for the largest
+## category. The headline backtest gives one origin per horizon, so each
+## factor rests on a single quarter and a category holding ~25
+## institutions. Move the origin one quarter and the ratio moves.
+##
+## This re-runs the h=20 backtest at several origins and reports the
+## spread. Use the MEAN as the factor and quote the range as its
+## uncertainty -- "the correction is 0.73, plausibly 0.65 to 0.82" is an
+## honest object; "the correction is 0.702" is not.
+##
+## Origins must leave a full h-quarter window inside the sample, so they
+## run backwards from N_Q - h.
+## ---------------------------------------------------------------------
+A7_ORIGIN_STEP <- 2      # quarters between origins
+A7_N_ORIGIN    <- 6      # how many to try per horizon
+
+## Split the A7 count into INCUMBENTS (in A7 at the origin) and ENTRANTS
+## (below A7 at the origin). The bias lives in the entrants; incumbent
+## predictions should be close to unbiased. Two factor sets come out:
+##   factor_all -- actual / predicted for the whole category (original)
+##   factor_ent -- actual entrants / predicted entrant mass
+## [23.6b] with A7_FACTOR_SCOPE = "entrants" needs factor_ent.
+a7_factor_spread <- function(h) {
+  origins <- seq(N_Q - h, by = -A7_ORIGIN_STEP, length.out = A7_N_ORIGIN)
+  origins <- origins[origins > 40]
+  out <- lapply(origins, function(o) {
+    d <- bt_cohort(h, o)
+    if (nrow(d) < 500) return(NULL)
+    pl <- bt_pools(h, o)
+    P  <- emp_bucket_probs(pl, d$cat_k, d$y_raw, LOG_EDGE)
+    inc <- d$cat_k == N_CAT
+    data.frame(h = h, origin = o, label = qgrid$q_label[o],
+               pred = sum(P[, N_CAT]), actual = sum(d$cat_act == N_CAT),
+               pred_inc = sum(P[inc, N_CAT]),
+               act_inc  = sum(d$cat_act[inc] == N_CAT),
+               pred_ent = sum(P[!inc, N_CAT]),
+               act_ent  = sum(d$cat_act[!inc] == N_CAT))
+  })
+  bind_rows(out) %>%
+    mutate(factor_all = round(actual / pmax(pred, 1e-9), 3),
+           factor_inc = round(act_inc / pmax(pred_inc, 1e-9), 3),
+           factor_ent = round(act_ent / pmax(pred_ent, 1e-9), 3))
+}
+
+a7_spread <- bind_rows(lapply(H_SET, a7_factor_spread))
+as.data.frame(a7_spread)
+
+a7_summary <- a7_spread %>% group_by(h) %>%
+  summarise(n_origins = n(),
+            mean_all = round(mean(factor_all), 3),
+            mean_inc = round(mean(factor_inc), 3),
+            mean_ent = round(mean(factor_ent), 3),
+            min_ent  = round(min(factor_ent), 3),
+            max_ent  = round(max(factor_ent), 3),
+            .groups = "drop")
+as.data.frame(a7_summary)
+
+cat("\nIncumbent factors should sit near 1.0. If they do, the bias is\n",
+    "confirmed to be in crossings and the entrant scope is the right one.\n")
+
+cat("\nFor A7_FACTOR_SCOPE <- \"entrants\" paste this into [23.6b]:\n")
+cat("A7_FACTORS <- c(",
+    paste(sprintf('"%d" = %.3f', a7_summary$h, a7_summary$mean_ent),
+          collapse = ", "), ")\n")
+cat("\nFor A7_FACTOR_SCOPE <- \"all\" (original behaviour) it would be:\n")
+cat("A7_FACTORS <- c(",
+    paste(sprintf('"%d" = %.3f', a7_summary$h, a7_summary$mean_all),
+          collapse = ", "), ")\n")
+cat("\nQuote min_ent .. max_ent as the uncertainty on the correction.\n",
+    "If they straddle 1.0 at any horizon, the bias is not established\n",
+    "there and that factor should be set to 1.\n")
+
+## ---------------------------------------------------------------------
 ## [25.9] Verdict
 ## ---------------------------------------------------------------------
 a7 <- count_tab %>% filter(cat == "A7_GE10B")
@@ -319,6 +438,7 @@ as.data.frame(verdict)
 
 saveRDS(list(BT = BT, BT_POOLS = BT_POOLS, BT_RES = BT_RES,
              BT_ASSIGN = BT_ASSIGN,
+             a7_spread = a7_spread, a7_summary = a7_summary,
              count_tab = count_tab, dir_tab = dir_tab, acc_tab = acc_tab,
              compare_bias = compare_bias, verdict = verdict,
              FROZEN_REF = FROZEN_REF),

@@ -67,7 +67,7 @@ stopifnot(exists("zip_base"))
 stopifnot(exists("counts"), exists("inst_out"), exists("TRANS"),
           exists("cell_counts"), exists("movers"), exists("down_risk"),
           exists("count_tab"), exists("dir_tab"), exists("acc_tab"),
-          exists("A7_ONLY_CALIB"), exists("A7_FACTORS"),
+          exists("A7_ONLY_CALIB"), exists("A7_FACTORS"), exists("A7_FACTOR_SCOPE"),
           exists("apportion"), exists("inst"))
 
 ## ---------------------------------------------------------------------
@@ -131,7 +131,7 @@ a7_bias_5y <- count_tab$pct[count_tab$h == 20 & count_tab$cat == CAT_LABELS[N_CA
 a7_fac_txt <- paste(sprintf("%s: %.3f", H_LAB, A7_FACTORS[as.character(H_SET)]),
                     collapse = "; ")
 a7_method_note <- if (A7_APPLIED) sprintf(
-  "3. THE LARGEST CATEGORY IS CORRECTED. Out of sample the uncorrected $10B-and-over count ran about %.0f%% high at five years. The published figures scale that category's probabilities by backtest-derived factors (%s) and reallocate the released mass to the other categories within each institution's row. See Validation.",
+  "3. THE LARGEST CATEGORY IS CORRECTED. Out of sample the uncorrected $10B-and-over count ran about %.0f%% high at five years, and the excess was in institutions projected to CROSS $10B rather than in those already above it. The published figures scale the probability of crossing by backtest-derived factors (%s) for institutions below $10B today, and reallocate the released mass to the other categories within each institution's row. Institutions already above $10B are not scaled. See Validation.",
   a7_bias_5y, a7_fac_txt) else sprintf(
   "3. THE LARGEST CATEGORY IS OVER-COUNTED. Out of sample the $10B-and-over count runs about %.0f%% high at five years. See Validation.",
   a7_bias_5y)
@@ -139,7 +139,7 @@ a7_short_note <- if (A7_APPLIED)
   "The $10B-and-over figures include a backtest-derived downward correction (see Method and Validation); read them as central estimates with wide uncertainty." else
   "The $10B-and-over figures should be read as upper estimates; see Validation."
 a7_valid_note <- if (A7_APPLIED) sprintf(
-  "The correction for the $10B category HAS been applied to the published figures: probabilities of the $10B-and-over category were scaled by %s, the actual/predicted ratios from this backtest. The backtest figures on this tab are UNCORRECTED so the reader can see the bias the correction addresses.",
+  "The correction for the $10B category HAS been applied to the published figures: for institutions below $10B today, the probability of being in the $10B-and-over category was scaled by %s, the ratio of actual to predicted entrants from this backtest. Institutions already above $10B are not scaled. The backtest figures on this tab are UNCORRECTED so the reader can see the bias the correction addresses.",
   a7_fac_txt) else
   "The correction for the $10B category has NOT been applied to the published figures. Applying it would give a lower count; the uncorrected figure is published with this caveat instead."
 a7_limit_txt <- if (A7_APPLIED)
