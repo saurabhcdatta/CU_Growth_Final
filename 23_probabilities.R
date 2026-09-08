@@ -500,6 +500,7 @@ PROB <- lapply(H_SET, function(h)
   emp_bucket_probs(POOLS[[as.character(h)]], fc$cat_k, fc$y_raw,
                    EDGES[[as.character(h)]]))
 names(PROB) <- as.character(H_SET)
+A7_CORRECTED <- FALSE      # reset: PROB is raw again. [23.6b] flips it.
 
 PROB_ALT <- lapply(H_SET, function(h)
   emp_bucket_probs(POOLS[[as.character(h)]], fc$cat_k, fc$y_raw,
@@ -655,7 +656,24 @@ A7_ONLY_CALIB <- TRUE
 ## entrants only under-corrects; an entrant factor applied to all rows
 ## over-corrects. [25.8b] prints both, labelled.
 A7_FACTOR_SCOPE <- "entrants"
-A7_FACTORS      <- c("4" = 0.839, "12" = 0.667, "20" = 0.702)  # REPLACE with entrant factors from [25.8b]
+## Entrant factors from [25.8b], Sept 2026 run (6 origins per horizon):
+##   h=4  mean 0.162 (range 0.000-0.442)  -- tiny counts, fragile
+##   h=12 mean 0.323 (range 0.124-0.693)
+##   h=20 mean 0.734 (range 0.377-1.14)   -- NOT used, see below
+## The five-year factor is the pooled ratio across the 3- and 5-year
+## origins (12 origins, sum of actual entrants / sum of predicted entrant
+## mass = 0.496). The per-horizon 0.734 rests on origins whose windows
+## contain the pandemic surge and implies 25 crossings in five years,
+## against a historical maximum of 14 in any five-year window since 2011.
+## Quote 37-64 as the five-year A7 range across origins.
+A7_FACTORS      <- c("4" = 0.162, "12" = 0.323, "20" = 0.496)
+
+## Block-by-block runs make it easy to execute this block twice. The
+## correction is NOT idempotent -- a second pass multiplies entrants by the
+## factor again -- so refuse rather than silently double-correct.
+if (A7_ONLY_CALIB && isTRUE(A7_CORRECTED))
+  stop("[23.6b] has already been applied to PROB in this session. ",
+       "Re-run [23.4] (rebuilds PROB) before applying it again.")
 
 if (A7_ONLY_CALIB) {
   ent <- if (A7_FACTOR_SCOPE == "entrants") fc$cat_k < N_CAT else
@@ -683,6 +701,7 @@ if (A7_ONLY_CALIB) {
                 h, b_inc + b_ent, sum(P[, N_CAT]),
                 b_inc, sum(P[!ent, N_CAT]), b_ent, sum(P[ent, N_CAT]), f))
   }
+  A7_CORRECTED <- TRUE
   cat("A7-only calibration APPLIED. Say so on the Method tab.\n")
 } else {
   cat("A7-only calibration NOT applied. A7 is published uncorrected and\n",
