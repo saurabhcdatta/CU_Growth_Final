@@ -265,13 +265,30 @@ extra_tbl <- extra %>%
             !!H_LAB[2] := pmin(round(h12), counts_int$h12[N_CAT]),
             !!H_LAB[3] := pmin(round(h20), counts_int$h20[N_CAT]))
 
+## $10B-$15B band: the published A7 count less the $15B-and-over line.
+## Derived, so it reconciles to both by construction. Placed first so the
+## reader sees the band before the overlapping "and over" lines.
+i15 <- which(extra$threshold == 15e9)
+if (length(i15) == 1) {
+  band_row <- data.frame(
+    Threshold = "$10B - $15B",
+    Today = counts_int$now[N_CAT] - extra_tbl$Today[i15],
+    h4  = counts_int$h4[N_CAT]  - extra_tbl[[H_LAB[1]]][i15],
+    h12 = counts_int$h12[N_CAT] - extra_tbl[[H_LAB[2]]][i15],
+    h20 = counts_int$h20[N_CAT] - extra_tbl[[H_LAB[3]]][i15],
+    stringsAsFactors = FALSE)
+  names(band_row)[3:5] <- H_LAB
+  stopifnot(all(band_row[, -1] >= 0))
+  extra_tbl <- bind_rows(band_row, extra_tbl)
+}
+
 SH[[length(SH) + 1]] <- mk_sheet(
   "Total", "Projected counts by asset category",
   sprintf("All %s institutions. Totals are held fixed -- no mergers.",
           format(nrow(inst_out), big.mark = ",")),
   notes = c(
     "Every count is a whole number of institutions and matches the Institutions tab exactly: filter that tab by category and horizon and you will get the figure here. The eight regional tabs add to this one.",
-    "The supplementary thresholds below OVERLAP the table above -- a $15B institution is also counted in $10B and over. They are not a partition and must not be added to the total.",
+    "The supplementary lines below OVERLAP the table above -- a $15B institution is also counted in $10B and over. They are not a partition and must not be added to the total. The $10B-$15B line is the $10B-and-over count less the $15B-and-over count.",
     a7_short_note),
   blocks = list(
     list(head = "Counts by category", df = tot_tbl,
@@ -525,7 +542,13 @@ SH[[length(SH) + 1]] <- mk_sheet(
           qgrid$q_label[N_Q - 20], qgrid$q_label[N_Q - 4], qgrid$q_label[N_Q]),
   notes = c(
     "The method was re-estimated using only data available at each past origin, then used to forecast forward. Nothing after the origin was used.",
-    "WHAT HELD UP: category counts. Five of seven categories are within 2% at five years.",
+    sprintf("WHAT HELD UP: category counts. At five years %d of 7 categories are within 2%% and %d of 7 within 5%%; the average error is %.0f institutions on a cohort of %s.",
+            sum(abs(count_tab$pct[count_tab$h == 20]) <= 2),
+            sum(abs(count_tab$pct[count_tab$h == 20]) <= 5),
+            mean(abs(count_tab$err[count_tab$h == 20])),
+            format(sum(count_tab$actual[count_tab$h == 20]), big.mark = ",")),
+    sprintf("The under-$10M category came in %.0f%% low: the model expected more small institutions to grow out of it than did, because 2022-23 deposit outflows pushed institutions back below the line. This is the same weakness as the downward-movement shortfall below.",
+            abs(count_tab$pct[count_tab$h == 20 & count_tab$cat == CAT_LABELS[1]])),
     sprintf("WHAT DID NOT: the $10B-and-over category came in %.0f%% high at five years, and downward movement is under-predicted beyond one year (down ratio %.2f at five years against 1.00 for a perfect forecast).",
             count_tab$pct[count_tab$h == 20 & count_tab$cat == CAT_LABELS[N_CAT]],
             dir_tab$down_ratio[dir_tab$h == 20]),
