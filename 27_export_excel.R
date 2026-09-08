@@ -389,34 +389,45 @@ for (i in seq_len(nrow(cells))) {
   n_cell <- sum(d$now)
   stopifnot(all(colSums(d[, c("h4", "h12", "h20")]) == n_cell))
 
-  mv <- movers %>% filter(h == 20, region == rg, cu_type == ct) %>%
-    left_join(inst_out %>%
-                select(join_number, cat_1y, assets_med_1y,
-                       cat_3y, assets_med_3y),
-              by = "join_number") %>%
-    arrange(desc(assets_now_m)) %>%
-    transmute(`Credit union` = cu_name, Today = CAT_PRETTY[from],
-              `Assets ($M)` = assets_now_m,
+  ## EVERY institution in the cell, largest first. The count table above is
+  ## a tally of exactly these rows, so the list must be complete -- a
+  ## movers-only list left field staff unable to find their own credit
+  ## unions and unable to reproduce the counts.
+  cell_inst <- inst_out %>%
+    filter(region == rg, cu_type == ct) %>%
+    arrange(desc(assets_now)) %>%
+    transmute(`Join number` = join_number,
+              `Credit union` = cu_name,
+              State = state,
+              Today = CAT_PRETTY[asset_cat_now],
+              `Assets ($M)` = round(assets_now / 1e6, 1),
               `1yr` = CAT_PRETTY[cat_1y],
               `Median 1yr ($M)` = round(assets_med_1y / 1e6, 1),
               `3yr` = CAT_PRETTY[cat_3y],
               `Median 3yr ($M)` = round(assets_med_3y / 1e6, 1),
-              `5yr` = CAT_PRETTY[to],
-              `Median 5yr ($M)` = med_m, `P(5yr)` = p_assign)
+              `5yr` = CAT_PRETTY[cat_5y],
+              `Median 5yr ($M)` = round(assets_med_5y / 1e6, 1),
+              `P(5yr)` = p_5y,
+              `Changes category by 5yr` = ifelse(cat_5y != asset_cat_now, "yes", ""),
+              `Down risk` = ifelse(down_risk_5y, "yes", ""))
+  stopifnot(nrow(cell_inst) == n_cell)
 
   SH[[length(SH) + 1]] <- mk_sheet(
     nm, paste(REG_LAB[as.character(rg)], "-", CT_LAB[as.character(ct)]),
     sprintf("%s institutions", format(n_cell, big.mark = ",")),
     notes = c(
-      "Whole numbers of institutions. Counts tie to this cell's own institution count at every horizon and match the Institutions tab filtered to this region and charter.",
-      "The movers list names institutions whose assigned category changes. Assignment is by forecast size and cannot move an institution downward -- see the Down Risk tab for that."),
+      "Whole numbers of institutions. Counts tie to this cell's own institution count at every horizon; the list below contains every institution in the cell, and counting it by category reproduces the table.",
+      "Assignment is by forecast size and cannot move an institution downward. 'Changes category by 5yr' marks institutions whose assigned category differs from today's; 'Down risk' marks elevated probability of falling a category -- see the Down Risk tab."),
     blocks = list(
       list(head = "Counts by category", df = wide,
            styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT)),
-      list(head = "Institutions changing category by five years", df = mv,
-           styles = c(S_NORM, S_NORM, S_INT, S_NORM, S_INT, S_NORM, S_INT,
-                      S_NORM, S_INT, S_DEC))),
-    cols = col_widths(list(c(1, 1, 38), c(2, 10, 16))))
+      list(head = sprintf("All %s institutions, largest first",
+                          format(n_cell, big.mark = ",")),
+           df = cell_inst,
+           styles = c(S_NORM, S_NORM, S_NORM, S_NORM, S_INT, S_NORM, S_INT,
+                      S_NORM, S_INT, S_NORM, S_INT, S_DEC, S_NORM, S_NORM))),
+    cols = col_widths(list(c(1, 1, 12), c(2, 2, 38), c(3, 3, 8),
+                           c(4, 14, 16))))
 }
 
 length(SH)
