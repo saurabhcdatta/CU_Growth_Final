@@ -532,15 +532,24 @@ SH[[length(SH) + 1]] <- mk_sheet(
     sprintf("For comparison, the previous ARIMA-based method predicted %d upward moves against %d actual over five years, and %d downward against %d.",
             FROZEN_REF$up_5y_pred, FROZEN_REF$up_5y_act,
             FROZEN_REF$down_5y_pred, FROZEN_REF$down_5y_act),
-    a7_valid_note),
-  blocks = list(
+    a7_valid_note,
+    if (exists("a7_sensitivity")) "The first table shows what the $10B-and-over count would read under each defensible choice of correction factor. The published figures use a single factor pooled across the three- and five-year backtest origins; the per-horizon estimates differ mainly because their windows fall in different growth regimes."),
+  blocks = c(
+    if (exists("a7_sensitivity")) list(list(
+      head = "$10B-and-over count under alternative correction factors (1yr / 3yr / 5yr)",
+      df = a7_sensitivity %>%
+        transmute(Choice = choice, `Entrant factors` = factors,
+                  !!H_LAB[1] := round(h4), !!H_LAB[2] := round(h12),
+                  !!H_LAB[3] := round(h20)),
+      styles = c(S_NORM, S_NORM, S_INT, S_INT, S_INT))),
+    list(
     list(head = "Five-year count accuracy", df = val_counts,
          styles = c(S_NORM, S_INT, S_DEC, S_INT, S_DEC, S_DEC)),
     list(head = "Direction of movement", df = val_dir,
          styles = c(S_NORM, S_DEC, S_INT, S_DEC, S_INT, S_DEC, S_DEC)),
     list(head = "Institution-level accuracy", df = val_acc,
-         styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC))),
-  cols = col_widths(list(c(1, 1, 24), c(2, 8, 16))))
+         styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC)))),
+  cols = col_widths(list(c(1, 1, 40), c(2, 8, 16))))
 
 ## ---------------------------------------------------------------------
 ## [27.12] Diagnostics

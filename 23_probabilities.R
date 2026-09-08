@@ -666,7 +666,13 @@ A7_FACTOR_SCOPE <- "entrants"
 ## contain the pandemic surge and implies 25 crossings in five years,
 ## against a historical maximum of 14 in any five-year window since 2011.
 ## Quote 37-64 as the five-year A7 range across origins.
-A7_FACTORS      <- c("4" = 0.162, "12" = 0.323, "20" = 0.496)
+## Decision (Sept 8, 2026): ONE pooled factor at every horizon. The
+## per-horizon means differ because their windows land in different
+## regimes (0.32 for windows through the 2022-23 runoff, 0.73 for windows
+## containing the surge), and both ranges contain 0.496. The one-year
+## estimate (0.16) rests on a handful of crossings per origin and one
+## origin with none. The sensitivity table below shows all three choices.
+A7_FACTORS      <- c("4" = 0.496, "12" = 0.496, "20" = 0.496)
 
 ## Block-by-block runs make it easy to execute this block twice. The
 ## correction is NOT idempotent -- a second pass multiplies entrants by the
@@ -674,6 +680,8 @@ A7_FACTORS      <- c("4" = 0.162, "12" = 0.323, "20" = 0.496)
 if (A7_ONLY_CALIB && isTRUE(A7_CORRECTED))
   stop("[23.6b] has already been applied to PROB in this session. ",
        "Re-run [23.4] (rebuilds PROB) before applying it again.")
+
+PROB_RAW <- PROB      # uncorrected copy, for the sensitivity table below
 
 if (A7_ONLY_CALIB) {
   ent <- if (A7_FACTOR_SCOPE == "entrants") fc$cat_k < N_CAT else
@@ -707,6 +715,50 @@ if (A7_ONLY_CALIB) {
   cat("A7-only calibration NOT applied. A7 is published uncorrected and\n",
       "the backtest says it runs about 40% high at five years.\n")
 }
+
+## ---- sensitivity: what A7 reads under each defensible factor choice ----
+##
+## This is the exhibit that defends the published number: the alternatives
+## are shown, not hidden. Per-horizon factors come from a7_summary if 25
+## has run in this session (or from panel_backtest.rds); otherwise that
+## row is skipped.
+a7_count_under <- function(f_vec) {
+  sapply(H_SET, function(h) {
+    P <- PROB_RAW[[as.character(h)]][, N_CAT]
+    f <- f_vec[as.character(h)]
+    e <- if (A7_FACTOR_SCOPE == "entrants") fc$cat_k < N_CAT else rep(TRUE, nrow(fc))
+    if (is.finite(f)) P[e] <- P[e] * f
+    round(sum(P), 1)
+  })
+}
+if (!exists("a7_summary") && file.exists("panel_backtest.rds"))
+  a7_summary <- readRDS("panel_backtest.rds")$a7_summary
+a7_sensitivity <- data.frame(
+  choice = c("No correction", "Published (pooled entrant factor)"),
+  factors = c("1 / 1 / 1",
+              paste(sprintf("%.3f", A7_FACTORS[as.character(H_SET)]), collapse = " / ")),
+  rbind(a7_count_under(c("4" = 1, "12" = 1, "20" = 1)),
+        a7_count_under(A7_FACTORS)),
+  stringsAsFactors = FALSE)
+if (exists("a7_summary") && "mean_ent" %in% names(a7_summary)) {
+  f_ph <- setNames(a7_summary$mean_ent, as.character(a7_summary$h))
+  a7_sensitivity <- rbind(a7_sensitivity, data.frame(
+    choice = "Per-horizon entrant factors",
+    factors = paste(sprintf("%.3f", f_ph[as.character(H_SET)]), collapse = " / "),
+    rbind(a7_count_under(f_ph)), stringsAsFactors = FALSE))
+  f_lo <- setNames(a7_summary$min_ent, as.character(a7_summary$h))
+  f_hi <- setNames(a7_summary$max_ent, as.character(a7_summary$h))
+  a7_sensitivity <- rbind(a7_sensitivity,
+    data.frame(choice = "Lowest entrant factor across origins",
+               factors = paste(sprintf("%.3f", f_lo[as.character(H_SET)]), collapse = " / "),
+               rbind(a7_count_under(f_lo)), stringsAsFactors = FALSE),
+    data.frame(choice = "Highest entrant factor across origins",
+               factors = paste(sprintf("%.3f", f_hi[as.character(H_SET)]), collapse = " / "),
+               rbind(a7_count_under(f_hi)), stringsAsFactors = FALSE))
+}
+names(a7_sensitivity)[3:5] <- paste0("h", H_SET)
+cat("\nA7 sensitivity to the correction factor (entrants only):\n")
+print(a7_sensitivity, row.names = FALSE)
 
 ## Rows and totals must survive the correction
 for (h in H_SET) {
@@ -1180,7 +1232,7 @@ saveRDS(list(fc = fc, inst = inst, PROB = PROB, POOLS = POOLS,
              SPEC = SPEC, WEIGHTED = WEIGHTED, HALFLIFE = HALFLIFE,
              SCENARIO = SCENARIO, BUCKET_CALIB = BUCKET_CALIB,
              A7_ONLY_CALIB = A7_ONLY_CALIB, A7_FACTORS = A7_FACTORS,
-             A7_FACTOR_SCOPE = A7_FACTOR_SCOPE,
+             A7_FACTOR_SCOPE = A7_FACTOR_SCOPE, a7_sensitivity = a7_sensitivity,
              GROWTH_BASIS = GROWTH_BASIS, DELTA = DELTA,
              PRE_CUTOFF = PRE_CUTOFF, RECENT_FROM = RECENT_FROM,
              MIN_POOL = MIN_POOL, THIN_POOL = THIN_POOL, P_FLOOR = P_FLOOR,
