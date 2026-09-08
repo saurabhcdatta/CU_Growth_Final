@@ -855,9 +855,10 @@ colSums(counts[, paste0("h", H_SET)])       # each must be 4,202
 ## total stops adding to 4,202.
 ##
 ## THE CAVEAT IS SHARPER HERE THAN ANYWHERE ELSE. A $15B threshold sits in
-## the far right tail of a pool of about 21 observations, so the estimate
-## rests on a handful of historical cases and moves in coarse steps. It is
-## a reasonable order of magnitude and not a precise figure.
+## the far right tail of the A7 pool (339 observations once region 8 is
+## in; 21 before), so the estimate rests on a modest number of historical
+## cases and moves in coarse steps. A reasonable order of magnitude, not a
+## precise figure.
 ## ---------------------------------------------------------------------
 EXTRA_THRESHOLDS <- c(15e9, 20e9)
 
@@ -877,6 +878,11 @@ p_above <- function(h, level) {
 ## bias applies to these counts as well. Scaling by the A7 factor is the
 ## same correction, applied to the same population, from the same source.
 a7_factor <- function(h) {
+  ## A7-only correction [23.6b] takes precedence; it is the one in use.
+  if (A7_ONLY_CALIB) {
+    f <- A7_FACTORS[as.character(h)]
+    return(if (length(f) && is.finite(f)) unname(f) else 1)
+  }
   if (!BUCKET_CALIB) return(1)
   f <- calib_factors$f[calib_factors$h == h &
                        calib_factors$cat == CAT_LABELS[N_CAT]]
@@ -893,7 +899,7 @@ extra <- lapply(EXTRA_THRESHOLDS, function(L) {
 })
 extra <- bind_rows(extra)
 
-if (BUCKET_CALIB)
+if (BUCKET_CALIB || A7_ONLY_CALIB)
   cat("A7 calibration applied to supplementary thresholds:",
       paste(sprintf("h%d=%.3f", H_SET, sapply(H_SET, a7_factor)),
             collapse = "  "), "\n")
