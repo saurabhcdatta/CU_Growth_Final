@@ -468,14 +468,27 @@ inst_out <- inst %>%
 nrow(inst_out)
 head(as.data.frame(inst_out), 10)
 
-## Final tie-out: the institution table must reproduce the headline counts
+## Final tie-out. Under ASSIGN_BASIS = "counts" the institution table must
+## reproduce the probability-sum targets exactly. Under "median" the table
+## IS the published count -- there is nothing upstream for it to match --
+## so the check becomes: every institution assigned exactly once, and the
+## assignment agrees with the band its median falls in.
 for (h in c(4, 12, 20)) {
   col <- c("4" = "cat_1y", "12" = "cat_3y", "20" = "cat_5y")[as.character(h)]
   got <- as.numeric(table(factor(inst_out[[col]], levels = CAT_LABELS)))
-  stopifnot(identical(as.integer(got),
-                      as.integer(TARGET[[as.character(h)]]$target)))
+  if (ASSIGN_BASIS == "median") {
+    med <- inst[[paste0("assets_med_h", h)]][match(inst_out$join_number,
+                                                   inst$join_number)]
+    stopifnot(sum(got) == nrow(inst_out),
+              identical(CAT_LABELS[cat_of_median(med)], inst_out[[col]]))
+    cat(sprintf("h=%2d  every label matches its median band (total %d, largest category %d)\n",
+                h, sum(got), got[N_CAT]))
+  } else {
+    stopifnot(identical(as.integer(got),
+                        as.integer(TARGET[[as.character(h)]]$target)))
+  }
 }
-cat("\nInstitution table reproduces the published counts at all horizons.\n")
+cat("\nInstitution table is internally consistent at all horizons.\n")
 
 saveRDS(list(inst = inst, inst_out = inst_out, TARGET = TARGET,
              movers = movers, down_risk = down_risk, a7 = a7,
