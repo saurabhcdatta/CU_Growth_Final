@@ -83,6 +83,17 @@ stopifnot(exists("counts"), exists("inst_out"), exists("TRANS"),
 ## ---------------------------------------------------------------------
 ## [27.1] Settings
 ## ---------------------------------------------------------------------
+## How categories are labelled everywhere in this workbook (set in 24):
+##   "median" -- the band an institution's median forecast falls in
+##   "counts" -- the ranking cut that reproduces the probability sums
+AB <- if (exists("ASSIGN_BASIS")) ASSIGN_BASIS else "counts"
+med_a7_5y  <- sum(inst_out$assets_med_5y >= 10e9)        # tally at $10B
+if (!exists("PROB") && file.exists("panel_probs.rds")) {
+  .prb <- readRDS("panel_probs.rds"); PROB <- .prb$PROB; rm(.prb)
+}
+prob_a7_5y <- if (exists("PROB")) as.integer(round(sum(PROB[["20"]][, N_CAT]))) else NA_integer_
+cat("Category basis:", AB, "| $10B at 5yr -- by median", med_a7_5y,
+    "| weighted by chance of crossing", prob_a7_5y, "\n")
 OUT <- sprintf("CU_Growth_Forecast_%s_probability.xlsx", qgrid$q_label[N_Q])
 
 ## cu_type 1 = federal charter, 2 = federally insured state charter.
@@ -140,19 +151,30 @@ A7_APPLIED <- isTRUE(A7_ONLY_CALIB)
 a7_bias_5y <- count_tab$pct[count_tab$h == 20 & count_tab$cat == CAT_LABELS[N_CAT]]
 a7_fac_txt <- paste(sprintf("%s: %.3f", H_LAB, A7_FACTORS[as.character(H_SET)]),
                     collapse = "; ")
-a7_method_note <- if (A7_APPLIED) sprintf(
+a7_method_note <- if (AB == "median") sprintf(
+  "3. THE LARGEST CATEGORY IS NOT CORRECTED IN THESE COUNTS. Every count in this workbook is a tally of institutions by their projected (median) assets, which is what the field asked for. Out of sample that rule over-states crossings of $10B: institutions already above the line are projected almost exactly right, but about %.0f%% more are projected to cross than historically do. Weighting each institution by its chance of crossing instead would give a five-year count of about %d rather than %d. Treat the $10B figure here as the upper end and see Validation.",
+  100 * (1 / 0.496 - 1), prob_a7_5y, med_a7_5y)
+else if (A7_APPLIED) sprintf(
   "3. THE LARGEST CATEGORY IS CORRECTED. Out of sample the uncorrected $10B-and-over count ran about %.0f%% high at five years, and the excess was in institutions projected to CROSS $10B rather than in those already above it. The published figures scale the probability of crossing by backtest-derived factors (%s) for institutions below $10B today, and reallocate the released mass to the other categories within each institution's row. Institutions already above $10B are not scaled. See Validation.",
   a7_bias_5y, a7_fac_txt) else sprintf(
   "3. THE LARGEST CATEGORY IS OVER-COUNTED. Out of sample the $10B-and-over count runs about %.0f%% high at five years. See Validation.",
   a7_bias_5y)
-a7_short_note <- if (A7_APPLIED)
+a7_short_note <- if (AB == "median")
+  "The $10B-and-over figures count institutions whose projected assets reach $10B. Institutions near the line historically cross less often than typical growth implies, so read these as the upper end of the range; see Method and Validation."
+else if (A7_APPLIED)
   "The $10B-and-over figures include a backtest-derived downward correction (see Method and Validation); read them as central estimates with wide uncertainty." else
   "The $10B-and-over figures should be read as upper estimates; see Validation."
-a7_valid_note <- if (A7_APPLIED) sprintf(
+a7_valid_note <- if (AB == "median") sprintf(
+  "The counts in this workbook are tallies by projected assets and carry NO correction for the $10B category. The table above shows what the count would be if each institution were weighted by its chance of crossing (%s applied to crossings), which is the version this backtest supports: about %d at five years against the %d published. The difference is entirely institutions whose projected assets clear $10B but whose chance of actually being there is nearer one in two.",
+  a7_fac_txt, prob_a7_5y, med_a7_5y)
+else if (A7_APPLIED) sprintf(
   "The correction for the $10B category HAS been applied to the published figures: for institutions below $10B today, the probability of being in the $10B-and-over category was scaled by %s, the ratio of actual to predicted entrants from this backtest. Institutions already above $10B are not scaled. The backtest figures on this tab are UNCORRECTED so the reader can see the bias the correction addresses.",
   a7_fac_txt) else
   "The correction for the $10B category has NOT been applied to the published figures. Applying it would give a lower count; the uncorrected figure is published with this caveat instead."
-a7_limit_txt <- if (A7_APPLIED)
+a7_limit_txt <- if (AB == "median")
+  sprintf("the $10B category is counted by projected assets and is an upper estimate (%d here against about %d if weighted by chance of crossing)",
+          med_a7_5y, prob_a7_5y)
+else if (A7_APPLIED)
   sprintf("the $10B category over-counted by about %.0f%% before correction (correction applied)", a7_bias_5y) else
   sprintf("the $10B category over-counts by about %.0f%%", a7_bias_5y)
 
@@ -169,6 +191,7 @@ method_notes <- c(
          format(nrow(feat), big.mark = ","), START_YEAR, qgrid$q_label[N_Q]),
  "",
  "THREE ASSUMPTIONS THE READER MUST KNOW",
+ if (HAVE_EXIT) "1. TWO SETS OF COUNTS. The Total, Transitions and regional count tables hold every institution in the system (no mergers) so that they reconcile to the institution lists. The With Mergers tab and the matching block on each regional tab apply historical exit rates by category and show how many of today's institutions are expected still to be operating. Read the first for where institutions are heading, the second for how many there will be." else
  "1. NO MERGERS. The total is held fixed at the current count. Mergers have removed roughly 3.6% of credit unions a year, about a sixth over five years. These are not forecasts of how many credit unions will exist; they show where these institutions would land if all survived.",
  "2. THRESHOLDS ARE NOMINAL. The category edges are fixed dollar amounts that have never been indexed. Much of the projected movement is the erosion of those thresholds rather than credit unions changing size. See the Bucket Growth tab.",
  a7_method_note,
@@ -182,12 +205,15 @@ method_notes <- c(
 
 settings_tbl <- data.frame(
   Setting = c("Cohort date", "Institutions", "Horizons", "Method",
-              "Growth basis", "Price basis", "$10B category correction",
+              "Growth basis", "Price basis", "Category assigned by",
+              "$10B category correction",
               "Recency weighting", "Minimum pool", "Produced"),
   Value = c(qgrid$q_label[N_Q], format(nrow(inst_out), big.mark = ","),
             paste(H_LAB, collapse = ", "),
             "Empirical conditional distribution, by asset category",
             GROWTH_BASIS, PRICE_BASIS,
+            if (AB == "median") "median projected assets" else "probability-matched ranking",
+            if (AB == "median") "not applied -- counts are tallies by projected assets" else
             if (A7_APPLIED) paste("applied --", a7_fac_txt) else
               if (BUCKET_CALIB) "full-matrix raking applied" else
                 "not applied -- see Validation",
@@ -201,6 +227,16 @@ SH[[length(SH) + 1]] <- mk_sheet(
   notes = method_notes,
   blocks = list(list(head = "Settings", df = settings_tbl)),
   cols = col_widths(list(c(1, 1, 26), c(2, 2, 60))))
+
+## ---------------------------------------------------------------------
+## [27.3a] Merger adjustment from script 26, if it has run
+## ---------------------------------------------------------------------
+HAVE_EXIT <- exists("pop_counts") && exists("pop_cells") && exists("exit_rates")
+if (!HAVE_EXIT && file.exists("panel_exit.rds")) {
+  exr <- readRDS("panel_exit.rds"); list2env(exr, .GlobalEnv); HAVE_EXIT <- TRUE
+}
+cat("Merger adjustment:", if (HAVE_EXIT) "available -- With Mergers tab will be written"
+                          else "not available (run 26 to add it)", "\n")
 
 ## ---------------------------------------------------------------------
 ## [27.3b] PUBLISHED COUNTS ARE WHOLE NUMBERS, COUNTED OFF THE LIST
@@ -235,14 +271,24 @@ tab_cats <- function(d) {
 counts_int <- tab_cats(inst_out)
 stopifnot(all(colSums(counts_int[, -1]) == nrow(inst_out)))
 
-## Integer counts must equal the largest-remainder rounding of the soft
-## counts -- otherwise 24 and 23 disagree and neither should be published.
+## Under ASSIGN_BASIS = "counts" the tally must equal the largest-remainder
+## rounding of the probability sums. Under "median" it is a tally of where
+## each institution's median forecast lands and will differ; report the
+## gap rather than assert it away.
 for (h in H_SET) {
   soft <- counts[[paste0("h", h)]]
-  stopifnot(identical(counts_int[[paste0("h", h)]],
-                      as.integer(apportion(soft, nrow(inst_out)))))
+  tgt  <- as.integer(apportion(soft, nrow(inst_out)))
+  if (AB == "median") {
+    d <- counts_int[[paste0("h", h)]] - tgt
+    if (any(d != 0))
+      cat(sprintf("h=%2d  median-based tally vs probability sums: %s\n", h,
+                  paste(sprintf("%s %+d", CAT_LABELS[d != 0], d[d != 0]),
+                        collapse = ", ")))
+  } else {
+    stopifnot(identical(counts_int[[paste0("h", h)]], tgt))
+  }
 }
-cat("Integer counts reproduce largest-remainder rounding at every horizon.\n")
+cat("Counts assigned by:", AB, "\n")
 
 cell_counts_int <- inst_out %>%
   group_by(region, cu_type) %>%
@@ -266,51 +312,204 @@ tot_tbl <- counts_int %>%
             Change = h20 - now,
             `Pct change` = round(100 * (h20 - now) / pmax(now, 1), 1))
 
-## Supplementary thresholds: whole numbers, and nested inside the
-## published A7 count. These are rounded probability sums, not a count of
-## named institutions -- there is no assignment above $10B.
-extra_tbl <- extra %>%
-  transmute(Threshold = label, Today = as.integer(now),
-            !!H_LAB[1] := pmin(round(h4),  counts_int$h4[N_CAT]),
-            !!H_LAB[2] := pmin(round(h12), counts_int$h12[N_CAT]),
-            !!H_LAB[3] := pmin(round(h20), counts_int$h20[N_CAT]))
+## Supplementary thresholds. Under ASSIGN_BASIS = "median" these are
+## counted the same way as every other figure in the workbook -- the number
+## of institutions whose median forecast reaches the level -- so a reader
+## can reproduce them from the Institutions tab and they nest inside the
+## $10B row by construction. Under "counts" they are rounded probability
+## sums, capped at the published $10B count.
+MED_COL <- c("4" = "assets_med_1y", "12" = "assets_med_3y", "20" = "assets_med_5y")
+med_above <- function(h, L) sum(inst_out[[MED_COL[as.character(h)]]] >= L)
 
-## $10B-$15B band: the published A7 count less the $15B-and-over line.
-## Derived, so it reconciles to both by construction. Placed first so the
-## reader sees the band before the overlapping "and over" lines.
-i15 <- which(extra$threshold == 15e9)
-if (length(i15) == 1) {
-  band_row <- data.frame(
-    Threshold = "$10B - $15B",
-    Today = counts_int$now[N_CAT] - extra_tbl$Today[i15],
-    h4  = counts_int$h4[N_CAT]  - extra_tbl[[H_LAB[1]]][i15],
-    h12 = counts_int$h12[N_CAT] - extra_tbl[[H_LAB[2]]][i15],
-    h20 = counts_int$h20[N_CAT] - extra_tbl[[H_LAB[3]]][i15],
-    stringsAsFactors = FALSE)
-  names(band_row)[3:5] <- H_LAB
-  stopifnot(all(band_row[, -1] >= 0))
-  extra_tbl <- bind_rows(band_row, extra_tbl)
+if (AB == "median") {
+  extra_tbl <- data.frame(Threshold = extra$label,
+                          Today = as.integer(extra$now),
+                          stringsAsFactors = FALSE, check.names = FALSE)
+  for (i in seq_along(H_SET))
+    extra_tbl[[H_LAB[i]]] <- sapply(extra$threshold, function(L) med_above(H_SET[i], L))
+  ## Must nest inside the $10B row, which is itself a median tally
+  for (i in seq_along(H_SET))
+    stopifnot(all(extra_tbl[[H_LAB[i]]] <= counts_int[[paste0("h", H_SET[i])]][N_CAT]))
+  cat("Supplementary thresholds counted by median forecast.\n")
+} else {
+  extra_tbl <- extra %>%
+    transmute(Threshold = label, Today = as.integer(now),
+              !!H_LAB[1] := pmin(round(h4),  counts_int$h4[N_CAT]),
+              !!H_LAB[2] := pmin(round(h12), counts_int$h12[N_CAT]),
+              !!H_LAB[3] := pmin(round(h20), counts_int$h20[N_CAT]))
 }
+
+## Two PARTITIONS of the $10B-and-over row, as the stakeholders asked:
+##   Part A: $10B-$15B | $15B and over
+##   Part B: $10B-$15B | $15B-$20B | $20B and over
+## Each part adds exactly to the published A7 count at every date, so the
+## reader can check it against the table above. Built from the corrected
+## $15B+ / $20B+ sums (rounded, capped at A7) by subtraction.
+i15 <- which(extra$threshold == 15e9); i20 <- which(extra$threshold == 20e9)
+stopifnot(length(i15) == 1, length(i20) == 1)
+a7_line <- c(counts_int$now[N_CAT], counts_int$h4[N_CAT], counts_int$h12[N_CAT], counts_int$h20[N_CAT])
+l15 <- unlist(extra_tbl[i15, c("Today", H_LAB)]); l20 <- unlist(extra_tbl[i20, c("Today", H_LAB)])
+l20 <- pmin(l20, l15)                      # nesting
+mk_part <- function(labels, rows) {
+  d <- data.frame(Band = labels, stringsAsFactors = FALSE)
+  d$Today <- sapply(rows, function(r) r[1])
+  for (i in seq_along(H_LAB)) d[[H_LAB[i]]] <- sapply(rows, function(r) r[i + 1])
+  d <- bind_rows(d, data.frame(Band = "$10B and over (total)", Today = sum(d$Today),
+                               setNames(as.list(colSums(d[, H_LAB, drop = FALSE])), H_LAB),
+                               check.names = FALSE))
+  stopifnot(all(d[nrow(d), -1] == a7_line), all(d[, -1] >= 0))
+  d
+}
+part_a <- mk_part(c("$10B - $15B", "$15B and over"),
+                  list(a7_line - l15, l15))
+part_b <- mk_part(c("$10B - $15B", "$15B - $20B", "$20B and over"),
+                  list(a7_line - l15, l15 - l20, l20))
 
 SH[[length(SH) + 1]] <- mk_sheet(
   "Total", "Projected counts by asset category",
   sprintf("All %s institutions. Totals are held fixed -- no mergers.",
           format(nrow(inst_out), big.mark = ",")),
   notes = c(
-    "Every count is a whole number of institutions and matches the Institutions tab exactly: filter that tab by category and horizon and you will get the figure here. The eight regional tabs add to this one.",
-    "The supplementary lines below OVERLAP the table above -- a $15B institution is also counted in $10B and over. They are not a partition and must not be added to the total. The $10B-$15B line is the $10B-and-over count less the $15B-and-over count.",
+    if (AB == "median")
+      "Every count is a whole number of institutions and matches the Institutions tab exactly: a credit union is counted in the category its projected (median) assets fall in, so the category shown against any institution is the band its projected size lands in. The eight regional tabs add to this one."
+    else
+      "Every count is a whole number of institutions and matches the Institutions tab exactly: filter that tab by category and horizon and you will get the figure here. The eight regional tabs add to this one.",
+    "The two supplementary tables below split the $10B-and-over row into bands. Part A uses one cut at $15B; Part B uses cuts at $15B and $20B. Each part adds exactly to the $10B-and-over row above it. They are two views of the same institutions, not additional categories, and must not be added to the total.",
     a7_short_note),
   blocks = list(
     list(head = "Counts by category", df = tot_tbl,
          styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT, S_DEC)),
-    list(head = "Supplementary thresholds (overlapping, not a partition)",
-         df = extra_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT))),
+    list(head = "Part A: $10B and over split at $15B",
+         df = part_a, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT)),
+    list(head = "Part B: $10B and over split at $15B and $20B",
+         df = part_b, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT))),
   cols = col_widths(list(c(1, 1, 22), c(2, 7, 12))))
+
+## ---------------------------------------------------------------------
+## [27.4b] With Mergers -- expected population counts
+## ---------------------------------------------------------------------
+if (HAVE_EXIT && AB == "median") {
+  ## Population counts must rest on the same assignment as everything else:
+  ## take each institution's assigned category and multiply by its
+  ## category's survival rate, rather than the probability vector 26 used.
+  pop_counts <- data.frame(state = STATE_LAB,
+                           now = c(counts_int$now, 0L), stringsAsFactors = FALSE)
+  exits_by_origin <- data.frame(cat = CAT_LABELS, now = counts_int$now,
+                                stringsAsFactors = FALSE)
+  for (i in seq_along(H_SET)) {
+    hh <- as.character(H_SET[i]); surv <- 1 - P_EXIT[[hh]]
+    k  <- inst_out[[c("cat_1y", "cat_3y", "cat_5y")[i]]]
+    soft <- tapply(surv, factor(k, levels = CAT_LABELS), sum)
+    soft[is.na(soft)] <- 0
+    ex   <- nrow(inst_out) - sum(soft)
+    pop_counts[[paste0("h", hh)]] <- as.integer(apportion(c(soft, ex), nrow(inst_out)))
+    exits_by_origin[[paste0("h", hh)]] <-
+      as.integer(apportion(tapply(P_EXIT[[hh]],
+                                  factor(inst_out$asset_cat_now, levels = CAT_LABELS), sum),
+                           pop_counts[[paste0("h", hh)]][N_CAT + 1]))
+  }
+  compare_pop <- data.frame(cat = CAT_LABELS, now = counts_int$now,
+                            no_mergers_5y = counts_int$h20,
+                            with_mergers_5y = pop_counts$h20[1:N_CAT],
+                            difference = pop_counts$h20[1:N_CAT] - counts_int$h20)
+  pop_cells <- bind_rows(lapply(split(seq_len(nrow(inst_out)),
+                                      list(inst_out$region, inst_out$cu_type), drop = TRUE),
+    function(idx) {
+      out <- data.frame(region = as.character(inst_out$region[idx[1]]),
+                        cu_type = as.character(inst_out$cu_type[idx[1]]),
+                        state = STATE_LAB,
+                        now = c(as.integer(table(factor(inst_out$asset_cat_now[idx],
+                                                        levels = CAT_LABELS))), 0L),
+                        stringsAsFactors = FALSE)
+      for (i in seq_along(H_SET)) {
+        hh <- as.character(H_SET[i]); surv <- 1 - P_EXIT[[hh]][idx]
+        k <- inst_out[[c("cat_1y", "cat_3y", "cat_5y")[i]]][idx]
+        soft <- tapply(surv, factor(k, levels = CAT_LABELS), sum); soft[is.na(soft)] <- 0
+        out[[paste0("h", hh)]] <- as.integer(apportion(c(soft, length(idx) - sum(soft)),
+                                                       length(idx)))
+      }
+      out
+    }))
+  cat("With Mergers rebuilt on the median-based assignment.\n")
+}
+
+if (HAVE_EXIT) {
+  pc <- pop_counts
+  pop_tbl <- data.frame(
+    Category = c(CAT_PRETTY[CAT_LABELS], "Merged or closed", "Still operating"),
+    Today = c(pc$now[1:N_CAT], 0L, sum(pc$now[1:N_CAT])),
+    stringsAsFactors = FALSE, check.names = FALSE)
+  for (i in seq_along(H_SET)) {
+    hh <- paste0("h", H_SET[i])
+    pop_tbl[[H_LAB[i]]] <- c(pc[[hh]][1:N_CAT], pc[[hh]][N_CAT + 1], sum(pc[[hh]][1:N_CAT]))
+  }
+  pop_tbl$Change <- pop_tbl[[H_LAB[3]]] - pop_tbl$Today
+
+  side_tbl <- compare_pop %>%
+    transmute(Category = CAT_PRETTY[cat], Today = now,
+              `No mergers (Total tab)` = no_mergers_5y,
+              `With mergers` = with_mergers_5y,
+              Difference = difference)
+  side_tbl <- bind_rows(side_tbl, data.frame(
+    Category = "Total", Today = sum(side_tbl$Today),
+    `No mergers (Total tab)` = sum(side_tbl$`No mergers (Total tab)`),
+    `With mergers` = sum(side_tbl$`With mergers`),
+    Difference = sum(side_tbl$Difference), check.names = FALSE))
+
+  exit_tbl <- exits_by_origin %>%
+    transmute(`Category at cohort date` = CAT_PRETTY[cat], Today = now,
+              !!H_LAB[1] := h4, !!H_LAB[2] := h12, !!H_LAB[3] := h20)
+  tot_row <- data.frame(`Category at cohort date` = "Total", Today = sum(exit_tbl$Today),
+                        check.names = FALSE)
+  for (hl in H_LAB) tot_row[[hl]] <- sum(exit_tbl[[hl]])
+  exit_tbl <- bind_rows(exit_tbl, tot_row)
+
+  rate_tbl <- exit_rates %>%
+    transmute(Category = CAT_PRETTY[cat], Horizon = H_LAB[match(h, H_SET)],
+              `Share exiting within horizon (%)` = rate_pct,
+              `Per year (%)` = annual_pct, Observations = n)
+
+  bt_tbl <- exit_bt_tot %>%
+    transmute(Horizon = H_LAB[match(h, H_SET)], Origin = origin,
+              Institutions = n, `Predicted exits` = predicted,
+              `Actual exits` = actual, `Actual / predicted` = ratio)
+
+  SH[[length(SH) + 1]] <- mk_sheet(
+    "With Mergers", "Projected counts by asset category, allowing for mergers and liquidations",
+    sprintf("All %s institutions at %s. Totals FALL as institutions leave.",
+            format(nrow(inst_out), big.mark = ","), qgrid$q_label[N_Q]),
+    notes = c(
+      "The Total tab holds every institution in the system; this tab does not. Each institution's category probabilities are multiplied by its category's historical survival rate, and the remainder is counted as merged or closed. 'Still operating' is the number of today's credit unions expected to exist at each date.",
+      "Exit rates depend on asset category only, estimated from every credit union since 2005: the share in each category that merged away or closed within one, three and five years. Small institutions exit far more often than large ones. New charters are not included (a handful a year).",
+      "These are expected counts, rounded to whole numbers. Unlike the Total and regional tabs they cannot be reproduced by counting a list: no institution is identified as likely to merge, and no such column exists anywhere in this workbook. A category-level rate says nothing about any particular credit union.",
+      "The regional tabs carry a matching block. Because each is rounded to its own cell, the eight blocks can differ from this table by one or two institutions in a category."),
+    blocks = list(
+      list(head = "Population counts by category (institutions still operating)",
+           df = pop_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT)),
+      list(head = sprintf("Five years out: without and with mergers (%s)", H_LAB[3]),
+           df = side_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT)),
+      list(head = "Expected exits by category at the cohort date (how many of today's institutions in each category will be gone)",
+           df = exit_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT)),
+      list(head = "Exit rates used",
+           df = rate_tbl, styles = c(S_NORM, S_NORM, S_DEC, S_DEC, S_INT)),
+      list(head = "Backtest: exits predicted from past dates vs actual by the cohort date",
+           df = bt_tbl, styles = c(S_NORM, S_NORM, S_INT, S_DEC, S_INT, S_DEC))),
+    cols = col_widths(list(c(1, 1, 26), c(2, 7, 20))))
+}
 
 ## ---------------------------------------------------------------------
 ## [27.5] Bucket Growth -- nominal vs real
 ## ---------------------------------------------------------------------
-real_int <- as.integer(apportion(nominal_vs_real$real_h20, nrow(inst_out)))
+## Real column: same rule as the nominal one. Under the median basis it is
+## a tally of medians against edges indexed forward at CPI_ASSUMPTION.
+if (AB == "median") {
+  defl5   <- (1 + CPI_ASSUMPTION)^(20 / 4)
+  real_k  <- findInterval(inst_out$assets_med_5y / defl5, BREAKS[-1]) + 1L
+  real_k  <- pmin(pmax(real_k, 1L), N_CAT)
+  real_int <- as.integer(table(factor(real_k, levels = seq_len(N_CAT))))
+} else {
+  real_int <- as.integer(apportion(nominal_vs_real$real_h20, nrow(inst_out)))
+}
 growth_tbl <- data.frame(
   Category = nominal_vs_real$cat, Today = counts_int$now,
   `5yr nominal` = counts_int$h20, `5yr real` = real_int,
@@ -422,20 +621,39 @@ for (i in seq_len(nrow(cells))) {
               `Down risk` = ifelse(down_risk_5y, "yes", ""))
   stopifnot(nrow(cell_inst) == n_cell)
 
+  pop_block <- list()
+  if (HAVE_EXIT) {
+    pcz <- pop_cells %>% filter(region == as.character(rg), cu_type == as.character(ct))
+    if (nrow(pcz) == N_CAT + 1) {
+      pw <- data.frame(Category = c(CAT_PRETTY[CAT_LABELS], "Merged or closed", "Still operating"),
+                       Today = c(pcz$now[1:N_CAT], 0L, sum(pcz$now[1:N_CAT])),
+                       stringsAsFactors = FALSE)
+      for (i in seq_along(H_SET)) {
+        hh <- paste0("h", H_SET[i])
+        pw[[H_LAB[i]]] <- c(pcz[[hh]][1:N_CAT], pcz[[hh]][N_CAT + 1], sum(pcz[[hh]][1:N_CAT]))
+      }
+      pw$Change <- pw[[H_LAB[3]]] - pw$Today
+      pop_block <- list(list(
+        head = "With mergers: expected population counts (see the With Mergers tab; not a count of the list below)",
+        df = pw, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT)))
+    }
+  }
+
   SH[[length(SH) + 1]] <- mk_sheet(
     nm, paste(REG_LAB[as.character(rg)], "-", CT_LAB[as.character(ct)]),
     sprintf("%s institutions", format(n_cell, big.mark = ",")),
     notes = c(
       "Whole numbers of institutions. Counts tie to this cell's own institution count at every horizon; the list below contains every institution in the cell, and counting it by category reproduces the table.",
       "Assignment is by forecast size and cannot move an institution downward. 'Changes category by 5yr' marks institutions whose assigned category differs from today's; 'Down risk' marks elevated probability of falling a category -- see the Down Risk tab."),
-    blocks = list(
-      list(head = "Counts by category", df = wide,
-           styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT)),
-      list(head = sprintf("All %s institutions, largest first",
+    blocks = c(list(
+      list(head = "Counts by category (no mergers)", df = wide,
+           styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT))),
+      pop_block,
+      list(list(head = sprintf("All %s institutions, largest first",
                           format(n_cell, big.mark = ",")),
            df = cell_inst,
            styles = c(S_NORM, S_NORM, S_NORM, S_NORM, S_INT, S_NORM, S_INT,
-                      S_NORM, S_INT, S_NORM, S_INT, S_DEC, S_NORM, S_NORM))),
+                      S_NORM, S_INT, S_NORM, S_INT, S_DEC, S_NORM, S_NORM)))),
     cols = col_widths(list(c(1, 1, 12), c(2, 2, 38), c(3, 3, 8),
                            c(4, 14, 16))))
 }
@@ -660,7 +878,10 @@ G[[length(G) + 1]] <- g_row("1. What this workbook is", "Purpose",
   sprintf("For every one of the %s federally insured credit unions active at %s, the forecast estimates which asset-size category it is likely to be in one, three and five years from now (%s). Counts by category, by region and charter, and a full institution list all come from the same assignment and agree with each other exactly.",
           format(N_ALL, big.mark = ","), cohort_lab, paste(H_LAB, collapse = ", ")))
 G[[length(G) + 1]] <- g_row("1. What this workbook is", "How it was built",
-  "For a credit union of a given size, the model looks at every credit union of that size since 2005 and asks where they were one, three and five years later. That spread of historical outcomes gives each institution a probability for each category. No forecast of the economy, no assumptions about management -- just what has historically happened to institutions of that size.")
+  if (AB == "median")
+    "For a credit union of a given size, the model looks at every credit union of that size since 2005 and asks where they were one, three and five years later. The middle of that range of outcomes is the institution's projected assets, and its category at each date is simply the band those projected assets fall in. Every count in this workbook is a tally of those categories. No forecast of the economy, no assumptions about management -- just what has historically happened to institutions of that size."
+  else
+    "For a credit union of a given size, the model looks at every credit union of that size since 2005 and asks where they were one, three and five years later. That spread of historical outcomes gives each institution a probability for each category. No forecast of the economy, no assumptions about management -- just what has historically happened to institutions of that size.")
 G[[length(G) + 1]] <- g_row("1. What this workbook is", "Three things to keep in mind",
   sprintf("(1) NO MERGERS: the total is held at %s throughout; these are not forecasts of how many credit unions will exist. (2) THRESHOLDS ARE IN TODAY'S DOLLARS: some of the movement is inflation carrying institutions across fixed lines. (3) THE COUNTS ARE FAR MORE RELIABLE THAN ANY ONE ROW: an institution near a threshold is close to a coin flip at five years -- always read the probability.",
           format(N_ALL, big.mark = ",")))
@@ -697,6 +918,15 @@ if (exists("growth_tbl")) {
     sprintf("With the category lines indexed for inflation, the under-$10M count would change by %+d instead of %+d, and the $1B-$10B count by %+d instead of %+d. Most of the decline in the smallest category is the line standing still while institutions grow slowly; most of the growth in $1B-$10B is real.",
             growth_tbl$`Real change`[1], growth_tbl$`Nominal change`[1],
             growth_tbl$`Real change`[6], growth_tbl$`Nominal change`[6]))
+}
+if (HAVE_EXIT) {
+  G[[length(G) + 1]] <- g_row("2. Key findings", "Allowing for mergers",
+    sprintf("Historically about %.1f%% of credit unions merge or close each year, mostly small ones. Applying those rates, %s of today's %s institutions are expected still to be operating in %s (%s exits), and the under-$10M category falls to %s rather than %s. See the With Mergers tab.",
+            100 * (1 - (1 - pop_counts$h20[N_CAT + 1] / nrow(inst_out))^(1/5)),
+            format(nrow(inst_out) - pop_counts$h20[N_CAT + 1], big.mark = ","),
+            format(nrow(inst_out), big.mark = ","), H_LAB[3],
+            format(pop_counts$h20[N_CAT + 1], big.mark = ","),
+            pop_counts$h20[1], counts_int$h20[1]))
 }
 n_move <- sum(inst_out$cat_5y != inst_out$asset_cat_now)
 n_down <- sum(inst_out$down_risk_5y)
@@ -838,7 +1068,8 @@ cat("  1. No mergers. The total is held fixed. Realised exit is ~3.6%/yr,\n",
     "    about a sixth over five years. These are not population counts.\n")
 cat(sprintf("  2. %s over-counts by %.0f%% out of sample at five years%s.\n",
             CAT_PRETTY[CAT_LABELS[N_CAT]], a7_bias_5y,
-            if (A7_APPLIED) paste0(" -- CORRECTED in published figures (", a7_fac_txt, ")")
+            if (AB == "median") " -- NOT corrected; counts are tallies by projected assets"
+            else if (A7_APPLIED) paste0(" -- CORRECTED in published figures (", a7_fac_txt, ")")
             else " -- NOT corrected"))
 cat(sprintf(paste0("  3. Downward movement under-predicted beyond one year",
                    "\n     (down ratio %.2f at five years; 1.00 would be perfect).\n"),
