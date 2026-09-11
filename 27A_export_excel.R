@@ -68,17 +68,35 @@ find_src("0_xlsx_helpers.R")
 find_src("0b_zip_base.R")
 stopifnot(exists("zip_base"))
 
-## prep <- readRDS("panel_prep.rds");     list2env(prep, .GlobalEnv)
-## prb  <- readRDS("panel_probs.rds");    list2env(prb,  .GlobalEnv)
-## asg  <- readRDS("panel_assign.rds");   list2env(asg,  .GlobalEnv)
-## cvr  <- readRDS("panel_cv.rds");       list2env(cvr,  .GlobalEnv)
-## bkt  <- readRDS("panel_backtest.rds"); list2env(bkt,  .GlobalEnv)
+## Load whatever the session is missing. Each file is loaded only if one of
+## the objects it carries is absent, so a warm session is left alone and a
+## cold one (or a restart part-way through the chain) still works.
+load_if_missing <- function(file, probe) {
+  if (!exists(probe) && file.exists(file)) {
+    cat("loading", file, "\n"); list2env(readRDS(file), .GlobalEnv); invisible(TRUE)
+  }
+}
+load_if_missing("panel_prep.rds",     "qgrid")
+load_if_missing("panel_features.rds", "feat")
+load_if_missing("panel_cv.rds",       "cv_summary")
+load_if_missing("panel_probs.rds",    "counts")
+load_if_missing("panel_assign.rds",   "inst_out")
+load_if_missing("panel_backtest.rds", "count_tab")
+load_if_missing("panel_exit.rds",     "pop_counts")
 
-stopifnot(exists("counts"), exists("inst_out"), exists("TRANS"),
-          exists("cell_counts"), exists("movers"), exists("down_risk"),
-          exists("count_tab"), exists("dir_tab"), exists("acc_tab"),
-          exists("A7_ONLY_CALIB"), exists("A7_FACTORS"), exists("A7_FACTOR_SCOPE"),
-          exists("apportion"), exists("inst"))
+missing <- setdiff(c("counts", "inst_out", "TRANS", "cell_counts", "movers",
+                     "down_risk", "count_tab", "dir_tab", "acc_tab",
+                     "A7_ONLY_CALIB", "A7_FACTORS", "A7_FACTOR_SCOPE",
+                     "apportion", "inst", "ASSIGN_BASIS"),
+                   ls(.GlobalEnv))
+if (length(missing))
+  stop("27 needs objects this session does not have: ",
+       paste(missing, collapse = ", "),
+       ".\n  count_tab / dir_tab / acc_tab come from 25; inst_out and ASSIGN_BASIS from 24;",
+       "\n  counts, TRANS and the A7 settings from 23. Run the missing script, or check",
+       "\n  that its .rds file is in ", getwd(), ".")
+
+stopifnot(nrow(inst_out) > 0, length(counts$cat) == N_CAT)
 
 ## ---------------------------------------------------------------------
 ## [27.1] Settings
@@ -151,32 +169,54 @@ A7_APPLIED <- isTRUE(A7_ONLY_CALIB)
 a7_bias_5y <- count_tab$pct[count_tab$h == 20 & count_tab$cat == CAT_LABELS[N_CAT]]
 a7_fac_txt <- paste(sprintf("%s: %.3f", H_LAB, A7_FACTORS[as.character(H_SET)]),
                     collapse = "; ")
-a7_method_note <- if (AB == "median") sprintf(
-  "3. THE LARGEST CATEGORY IS NOT CORRECTED IN THESE COUNTS. Every count in this workbook is a tally of institutions by their projected (median) assets, which is what the field asked for. Out of sample that rule over-states crossings of $10B: institutions already above the line are projected almost exactly right, but about %.0f%% more are projected to cross than historically do. Weighting each institution by its chance of crossing instead would give a five-year count of about %d rather than %d. Treat the $10B figure here as the upper end and see Validation.",
-  100 * (1 / 0.496 - 1), prob_a7_5y, med_a7_5y)
-else if (A7_APPLIED) sprintf(
-  "3. THE LARGEST CATEGORY IS CORRECTED. Out of sample the uncorrected $10B-and-over count ran about %.0f%% high at five years, and the excess was in institutions projected to CROSS $10B rather than in those already above it. The published figures scale the probability of crossing by backtest-derived factors (%s) for institutions below $10B today, and reallocate the released mass to the other categories within each institution's row. Institutions already above $10B are not scaled. See Validation.",
-  a7_bias_5y, a7_fac_txt) else sprintf(
-  "3. THE LARGEST CATEGORY IS OVER-COUNTED. Out of sample the $10B-and-over count runs about %.0f%% high at five years. See Validation.",
-  a7_bias_5y)
-a7_short_note <- if (AB == "median")
-  "The $10B-and-over figures count institutions whose projected assets reach $10B. Institutions near the line historically cross less often than typical growth implies, so read these as the upper end of the range; see Method and Validation."
-else if (A7_APPLIED)
-  "The $10B-and-over figures include a backtest-derived downward correction (see Method and Validation); read them as central estimates with wide uncertainty." else
-  "The $10B-and-over figures should be read as upper estimates; see Validation."
-a7_valid_note <- if (AB == "median") sprintf(
-  "The counts in this workbook are tallies by projected assets and carry NO correction for the $10B category. The table above shows what the count would be if each institution were weighted by its chance of crossing (%s applied to crossings), which is the version this backtest supports: about %d at five years against the %d published. The difference is entirely institutions whose projected assets clear $10B but whose chance of actually being there is nearer one in two.",
-  a7_fac_txt, prob_a7_5y, med_a7_5y)
-else if (A7_APPLIED) sprintf(
-  "The correction for the $10B category HAS been applied to the published figures: for institutions below $10B today, the probability of being in the $10B-and-over category was scaled by %s, the ratio of actual to predicted entrants from this backtest. Institutions already above $10B are not scaled. The backtest figures on this tab are UNCORRECTED so the reader can see the bias the correction addresses.",
-  a7_fac_txt) else
-  "The correction for the $10B category has NOT been applied to the published figures. Applying it would give a lower count; the uncorrected figure is published with this caveat instead."
-a7_limit_txt <- if (AB == "median")
-  sprintf("the $10B category is counted by projected assets and is an upper estimate (%d here against about %d if weighted by chance of crossing)",
-          med_a7_5y, prob_a7_5y)
-else if (A7_APPLIED)
-  sprintf("the $10B category over-counted by about %.0f%% before correction (correction applied)", a7_bias_5y) else
-  sprintf("the $10B category over-counts by about %.0f%%", a7_bias_5y)
+## Top-level if/else must be braced in R or the console parses the `else`
+## as a new statement -- see the gotchas note. Each of these is one
+## braced expression for that reason.
+a7_method_note <- {
+  if (AB == "median") {
+    sprintf("3. THE LARGEST CATEGORY IS NOT CORRECTED IN THESE COUNTS. Every count in this workbook is a tally of institutions by their projected (median) assets, which is what the field asked for. Out of sample that rule over-states crossings of $10B: institutions already above the line are projected almost exactly right, but about %.0f%% more are projected to cross than historically do. Weighting each institution by its chance of crossing instead would give a five-year count of about %d rather than %d. Treat the $10B figure here as the upper end and see Validation.",
+            100 * (1 / 0.496 - 1), prob_a7_5y, med_a7_5y)
+  } else if (A7_APPLIED) {
+    sprintf("3. THE LARGEST CATEGORY IS CORRECTED. Out of sample the uncorrected $10B-and-over count ran about %.0f%% high at five years, and the excess was in institutions projected to CROSS $10B rather than in those already above it. The published figures scale the probability of crossing by backtest-derived factors (%s) for institutions below $10B today, and reallocate the released mass to the other categories within each institution's row. Institutions already above $10B are not scaled. See Validation.",
+            a7_bias_5y, a7_fac_txt)
+  } else {
+    sprintf("3. THE LARGEST CATEGORY IS OVER-COUNTED. Out of sample the $10B-and-over count runs about %.0f%% high at five years. See Validation.",
+            a7_bias_5y)
+  }
+}
+
+a7_short_note <- {
+  if (AB == "median") {
+    "The $10B-and-over figures count institutions whose projected assets reach $10B. Institutions near the line historically cross less often than typical growth implies, so read these as the upper end of the range; see Method and Validation."
+  } else if (A7_APPLIED) {
+    "The $10B-and-over figures include a backtest-derived downward correction (see Method and Validation); read them as central estimates with wide uncertainty."
+  } else {
+    "The $10B-and-over figures should be read as upper estimates; see Validation."
+  }
+}
+
+a7_valid_note <- {
+  if (AB == "median") {
+    sprintf("The counts in this workbook are tallies by projected assets and carry NO correction for the $10B category. The table above shows what the count would be if each institution were weighted by its chance of crossing (%s applied to crossings), which is the version this backtest supports: about %d at five years against the %d published. The difference is entirely institutions whose projected assets clear $10B but whose chance of actually being there is nearer one in two.",
+            a7_fac_txt, prob_a7_5y, med_a7_5y)
+  } else if (A7_APPLIED) {
+    sprintf("The correction for the $10B category HAS been applied to the published figures: for institutions below $10B today, the probability of being in the $10B-and-over category was scaled by %s, the ratio of actual to predicted entrants from this backtest. Institutions already above $10B are not scaled. The backtest figures on this tab are UNCORRECTED so the reader can see the bias the correction addresses.",
+            a7_fac_txt)
+  } else {
+    "The correction for the $10B category has NOT been applied to the published figures. Applying it would give a lower count; the uncorrected figure is published with this caveat instead."
+  }
+}
+
+a7_limit_txt <- {
+  if (AB == "median") {
+    sprintf("the $10B category is counted by projected assets and is an upper estimate (%d here against about %d if weighted by chance of crossing)",
+            med_a7_5y, prob_a7_5y)
+  } else if (A7_APPLIED) {
+    sprintf("the $10B category over-counted by about %.0f%% before correction (correction applied)", a7_bias_5y)
+  } else {
+    sprintf("the $10B category over-counts by about %.0f%%", a7_bias_5y)
+  }
+}
 
 method_notes <- c(
  "WHAT THIS IS",
@@ -883,7 +923,7 @@ G[[length(G) + 1]] <- g_row("1. What this workbook is", "How it was built",
   else
     "For a credit union of a given size, the model looks at every credit union of that size since 2005 and asks where they were one, three and five years later. That spread of historical outcomes gives each institution a probability for each category. No forecast of the economy, no assumptions about management -- just what has historically happened to institutions of that size.")
 G[[length(G) + 1]] <- g_row("1. What this workbook is", "Three things to keep in mind",
-  sprintf("(1) NO MERGERS: the total is held at %s throughout; these are not forecasts of how many credit unions will exist. (2) THRESHOLDS ARE IN TODAY'S DOLLARS: some of the movement is inflation carrying institutions across fixed lines. (3) THE COUNTS ARE FAR MORE RELIABLE THAN ANY ONE ROW: an institution near a threshold is close to a coin flip at five years -- always read the probability.",
+  sprintf("(1) NO MERGERS in the main tables: the total is held at %s throughout; see the With Mergers tab for expected counts allowing for exits. (2) THRESHOLDS ARE IN TODAY'S DOLLARS: some of the movement is inflation carrying institutions across fixed lines. (3) THE COUNTS ARE FAR MORE RELIABLE THAN ANY ONE ROW: an institution whose projected assets land near a category line is close to a coin flip at five years -- check the Confidence marker before acting on its category.",
           format(N_ALL, big.mark = ",")))
 
 ## ---- 2. findings (computed) ------------------------------------------
