@@ -112,6 +112,13 @@ if (!exists("PROB") && file.exists("panel_probs.rds")) {
 prob_a7_5y <- if (exists("PROB")) as.integer(round(sum(PROB[["20"]][, N_CAT]))) else NA_integer_
 cat("Category basis:", AB, "| $10B at 5yr -- by median", med_a7_5y,
     "| weighted by chance of crossing", prob_a7_5y, "\n")
+
+## Is the merger adjustment from 26 available? Needed by the Method tab
+## below as well as by [27.4b], so it is settled here.
+HAVE_EXIT <- exists("pop_counts") && exists("pop_cells") && exists("exit_rates")
+cat("Merger adjustment:",
+    if (HAVE_EXIT) "available -- With Mergers tab will be written"
+    else "not available (run 26 to add it)", "\n")
 OUT <- sprintf("CU_Growth_Forecast_%s_probability.xlsx", qgrid$q_label[N_Q])
 
 ## cu_type 1 = federal charter, 2 = federally insured state charter.
@@ -222,7 +229,10 @@ method_notes <- c(
  "WHAT THIS IS",
  sprintf("For each of the %s credit unions active in %s, we estimate the probability of being in each asset category 1, 3 and 5 years out.",
          format(nrow(inst_out), big.mark = ","), qgrid$q_label[N_Q]),
- "Published counts are whole numbers of institutions. The probability sums are rounded to integers by largest remainder, and each institution is then assigned to one category by forecast size so that the assignments reproduce those integers exactly. The Total tab, the regional tabs and the Institutions tab therefore agree to the institution.",
+ if (AB == "median")
+   "Published counts are whole numbers of institutions. Each credit union's projected assets at a horizon are the middle of its range of historical outcomes, and its category is the band those projected assets fall in. Every count in the workbook -- Total, Transitions, the regional tabs, the supplementary bands -- is a tally of those categories, so the tables and the institution lists agree to the institution."
+ else
+   "Published counts are whole numbers of institutions. The probability sums are rounded to integers by largest remainder, and each institution is then assigned to one category by forecast size so that the assignments reproduce those integers exactly. The Total tab, the regional tabs and the Institutions tab therefore agree to the institution.",
  "",
  "HOW THE PROBABILITIES ARE PRODUCED",
  "The category edges are fixed dollar amounts, so the probability of landing in a category is the distribution of h-step asset growth read off at those edges.",
@@ -241,7 +251,10 @@ method_notes <- c(
  "",
  "READING AN INDIVIDUAL ROW",
  "The aggregate counts are considerably more reliable than any single institution's line. Errors across thousands of institutions largely offset; a single credit union near a size threshold is close to a coin flip at five years.",
- "Every institution row carries the probability of its assigned category. Read that column, not just the category.")
+ if (AB == "median")
+   "Every institution row carries a Confidence marker (high, medium, low) for its five-year category. Read that, not just the category: a credit union whose projected assets land just past a line is close to a coin flip."
+ else
+   "Every institution row carries the probability of its assigned category. Read that column, not just the category.")
 
 settings_tbl <- data.frame(
   Setting = c("Cohort date", "Institutions", "Horizons", "Method",
@@ -271,13 +284,6 @@ SH[[length(SH) + 1]] <- mk_sheet(
 ## ---------------------------------------------------------------------
 ## [27.3a] Merger adjustment from script 26, if it has run
 ## ---------------------------------------------------------------------
-HAVE_EXIT <- exists("pop_counts") && exists("pop_cells") && exists("exit_rates")
-if (!HAVE_EXIT && file.exists("panel_exit.rds")) {
-  exr <- readRDS("panel_exit.rds"); list2env(exr, .GlobalEnv); HAVE_EXIT <- TRUE
-}
-cat("Merger adjustment:", if (HAVE_EXIT) "available -- With Mergers tab will be written"
-                          else "not available (run 26 to add it)", "\n")
-
 ## ---------------------------------------------------------------------
 ## [27.3b] PUBLISHED COUNTS ARE WHOLE NUMBERS, COUNTED OFF THE LIST
 ##
