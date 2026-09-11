@@ -169,6 +169,30 @@ SH <- list()
 
 ## ---------------------------------------------------------------------
 ## [27.3] Method
+##
+## Self-contained: every block from here on re-derives the few session
+## settings it needs if they are missing, so any block can be run on its
+## own without having stepped through [27.1] first.
+## ---------------------------------------------------------------------
+ensure_ctx <- function() {
+  if (!exists("AB", .GlobalEnv))
+    assign("AB", if (exists("ASSIGN_BASIS")) ASSIGN_BASIS else "counts", .GlobalEnv)
+  if (!exists("HAVE_EXIT", .GlobalEnv))
+    assign("HAVE_EXIT",
+           exists("pop_counts") && exists("pop_cells") && exists("exit_rates"),
+           .GlobalEnv)
+  if (!exists("med_a7_5y", .GlobalEnv))
+    assign("med_a7_5y", sum(inst_out$assets_med_5y >= 10e9), .GlobalEnv)
+  if (!exists("prob_a7_5y", .GlobalEnv))
+    assign("prob_a7_5y",
+           if (exists("PROB")) as.integer(round(sum(PROB[["20"]][, N_CAT])))
+           else NA_integer_, .GlobalEnv)
+  invisible(NULL)
+}
+ensure_ctx()
+
+## ---------------------------------------------------------------------
+## [27.3] Method -- continued
 ## ---------------------------------------------------------------------
 ## A7 correction status -- every tab that mentions the $10B category reads
 ## these so the workbook cannot contradict what [23.6b] actually did.
@@ -352,6 +376,7 @@ cat("Eight regional tabs add to the Total tab exactly.\n")
 ## ---------------------------------------------------------------------
 ## [27.4] Total
 ## ---------------------------------------------------------------------
+ensure_ctx()
 tot_tbl <- counts_int %>%
   transmute(Category = CAT_PRETTY[cat], Today = now,
             !!H_LAB[1] := h4, !!H_LAB[2] := h12, !!H_LAB[3] := h20,
@@ -434,6 +459,7 @@ SH[[length(SH) + 1]] <- mk_sheet(
 ## ---------------------------------------------------------------------
 ## [27.4b] With Mergers -- expected population counts
 ## ---------------------------------------------------------------------
+ensure_ctx()
 if (HAVE_EXIT && AB == "median") {
   ## Population counts must rest on the same assignment as everything else:
   ## take each institution's assigned category and multiply by its
@@ -630,6 +656,7 @@ SH[[length(SH) + 1]] <- mk_sheet(
 ## ---------------------------------------------------------------------
 ## [27.7] Region x charter tabs
 ## ---------------------------------------------------------------------
+ensure_ctx()
 cells <- cell_counts_int %>% distinct(region, cu_type) %>% arrange(region, cu_type)
 
 for (i in seq_len(nrow(cells))) {
@@ -805,6 +832,7 @@ SH[[length(SH) + 1]] <- mk_sheet(
 ## ---------------------------------------------------------------------
 ## [27.11] Validation -- the backtest
 ## ---------------------------------------------------------------------
+ensure_ctx()
 val_counts <- count_tab %>% filter(h == 20) %>%
   transmute(Category = CAT_PRETTY[cat], `At origin` = start,
             Predicted = pred, Actual = actual, Error = err, `Pct` = pct)
@@ -912,6 +940,7 @@ stopifnot(!any(duplicated(vapply(SH, function(s) s$name, ""))),
 ## this tab cannot drift from them on a refresh. Prepended to SH so it is
 ## the first thing Excel opens on.
 ## ---------------------------------------------------------------------
+ensure_ctx()
 cohort_lab <- qgrid$q_label[N_Q]
 N_ALL      <- nrow(inst_out)
 g_row <- function(section, item, text)
