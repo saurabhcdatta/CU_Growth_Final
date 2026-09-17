@@ -77,8 +77,14 @@ stopifnot(exists("feat"), exists("PROB"), exists("fc"), exists("H_SET"),
 ##               matches GROWTH_BASIS = "full")
 ##   "recent" -- origins in the last EXIT_RECENT_Q quarters only. Use if
 ##               the by-year table in [26.2] shows a clear trend.
-EXIT_BASIS    <- cfg_get("EXIT_BASIS", "full")
-EXIT_RECENT_Q <- cfg_get("EXIT_RECENT_Q", 40L)
+## Sept 10 2026 backtest on the full basis: actual exits ran 1.35 / 1.33 /
+## 1.27 times predicted at 1 / 3 / 5 years, with the gap concentrated in
+## the $10M-$1B categories (ratios 1.4-3.2) and the under-$10M category
+## nearly right (1.08). Mergers have shifted toward mid-sized institutions
+## over the last decade; a 2005-2026 average understates that. "recent"
+## with a 15-year window keeps enough closed five-year windows to backtest.
+EXIT_BASIS    <- cfg_get("EXIT_BASIS", "recent")
+EXIT_RECENT_Q <- cfg_get("EXIT_RECENT_Q", 60L)
 MIN_EXIT_POOL <- cfg_get("MIN_EXIT_POOL", 200L)   # fall back to neighbour cats below this
 H_LAB_X <- setNames(c("1yr", "3yr", "5yr"), as.character(H_SET))
 
@@ -174,7 +180,7 @@ exit_bt <- bind_rows(lapply(H_SET, function(h) {
     group_by(cat_k) %>%
     summarise(n = n(), predicted = sum(rate), actual = sum(ex), .groups = "drop") %>%
     mutate(h = h, origin = qgrid$q_label[o], cat = CAT_LABELS[cat_k],
-           ratio = round(actual / pmax(predicted, 1e-9), 2))
+           ratio = ifelse(predicted >= 0.5, round(actual / predicted, 2), NA))
 }))
 cat("\nBacktest -- exits predicted vs actual by category of origin:\n")
 print(exit_bt %>% select(h, origin, cat, n, predicted = predicted, actual, ratio) %>%
@@ -199,6 +205,25 @@ P_EXIT <- lapply(H_SET, function(h) {
   r[fc$cat_k]
 })
 names(P_EXIT) <- as.character(H_SET)
+
+## A richer exit model from 30, if one was chosen there. Rows the model
+## could not score keep the category rate. The publication rule is
+## unchanged: expected counts only, nothing institution-level.
+EXIT_MODEL <- cfg_get("EXIT_MODEL", "cat")
+if (EXIT_MODEL != "cat") {
+  if (!exists("P_EXIT_ALT") && file.exists("panel_exit_models.rds"))
+    P_EXIT_ALT <- readRDS("panel_exit_models.rds")$P_EXIT_ALT
+  if (exists("P_EXIT_ALT") && !is.null(P_EXIT_ALT[[EXIT_MODEL]])) {
+    for (hh in as.character(H_SET)) {
+      alt <- P_EXIT_ALT[[EXIT_MODEL]][[hh]]
+      P_EXIT[[hh]] <- ifelse(is.finite(alt), alt, P_EXIT[[hh]])
+    }
+    cat("Exit probabilities from 30's '", EXIT_MODEL, "' model.\n", sep = "")
+  } else {
+    warning("EXIT_MODEL = '", EXIT_MODEL, "' requested but 30 has not produced it; using category rates.")
+    EXIT_MODEL <- "cat"
+  }
+} else cat("Exit probabilities: category rates (EXIT_MODEL = cat).\n")
 
 PROB_POP <- lapply(as.character(H_SET), function(hh) {
   P  <- PROB[[hh]] * (1 - P_EXIT[[hh]])
@@ -285,6 +310,10 @@ saveRDS(list(exit_rates = exit_rates, exit_wide = exit_wide,
              exits_by_origin = exits_by_origin, compare_pop = compare_pop,
              pop_cells = pop_cells, P_EXIT = P_EXIT, STATE_LAB = STATE_LAB,
              EXIT_BASIS = EXIT_BASIS, EXIT_RECENT_Q = EXIT_RECENT_Q,
+             EXIT_MODEL = EXIT_MODEL,
              MIN_EXIT_POOL = MIN_EXIT_POOL),
         file = "panel_exit.rds")
-cat("\nSaved panel_exit.rds. Run 27 to add the With Mergers tab.\n")
+cat(sprintf("\nOverall: %.1f%% of the cohort exits within five years (%.2f%%/yr).\n",
+            100 * pop_counts$h20[N_CAT + 1] / nrow(fc),
+            100 * (1 - (1 - pop_counts$h20[N_CAT + 1] / nrow(fc))^(1/5))))
+cat("Saved panel_exit.rds. Run 27 to add the With Mergers tab.\n")

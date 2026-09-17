@@ -1,0 +1,405 @@
+## =====================================================================
+## 30_exit_hazard_models.R  --  Can a richer model predict exits better
+##                              than the category rate in 26?
+##
+## WHY THIS SCRIPT EXISTS
+##   26's category-only exit rates under-predicted exits by about 30% out
+##   of sample on the full basis, worst in the $10M-$1B categories. Two
+##   different things could be wrong, and they need different fixes:
+##
+##   (a) LEVEL drift -- mergers have run faster in the last decade than the
+##       2005-2026 average. No institution-level covariate fixes this; it
+##       is a period effect. The candidates below include a "merger
+##       environment" adjustment that scales the rate by how the last
+##       eight quarters compare with the long run.
+##
+##   (b) ALLOCATION -- which institutions exit. Unlike growth, exit
+##       plausibly depends on things we can observe: slow or negative
+##       growth, small and shrinking, low net worth, weak earnings, a
+##       history of acquiring others (acquirers rarely get acquired). A
+##       covariate model can move exits between categories and regions
+##       even when the total is unchanged.
+##
+##   "Machine learning" helps with (b) if at all, and only if the signal is
+##   there. This script measures that instead of assuming it. Candidates
+##   run from the baseline up, each scored the same way, on blocked-origin
+##   folds with an h-quarter embargo (22's folds), so nothing sees its own
+##   future.
+##
+## THE SCORE THAT MATTERS
+##   For counts, calibration beats discrimination: a model that ranks
+##   institutions well but gets the number of exits wrong is useless here.
+##   So the headline is predicted-vs-actual exits BY CATEGORY across
+##   folds. Brier and concordance (AUC) are reported for completeness.
+##
+## WHAT IS PUBLISHED
+##   Nothing institution-level. Whatever wins feeds 26 as P_EXIT, and 26
+##   publishes expected counts only. The choice is made in the config:
+##   EXIT_MODEL = "cat" | "cat_env" | "logit" | "logit_fin" | "tree".
+##
+## RUN AFTER 22 and 26 (needs feat, make_folds from 22, and the exit
+## columns). A few minutes; the tree model adds a few more if available.
+## =====================================================================
+
+## ---- config (production) --------------------------------------------
+if (!exists("CONFIG_LOADED")) {
+  for (.p in c("00_config.R", "../00_config.R",
+               "S:/Projects/Credit_Union_Growth_Forecast/00_config.R"))
+    if (file.exists(.p)) { source(.p); break }
+  rm(.p)
+}
+if (!exists("cfg_get")) cfg_get <- function(name, default) default
+setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
+
+library(dplyr)
+library(tidyr)
+library(haven)
+library(splines)     # base R; natural splines for the logit
+
+## ---------------------------------------------------------------------
+## [30.0] Objects
+## ---------------------------------------------------------------------
+if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
+if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
+if (!exists("fc"))   { prb <- readRDS("panel_probs.rds"); list2env(prb, .GlobalEnv) }
+stopifnot(exists("feat"), exists("make_folds"), exists("fc"), exists("H_SET"),
+          exists("CAT_LABELS"), exists("N_CAT"), exists("N_Q"))
+if (!exists("FOLD_WIDTH")) FOLD_WIDTH <- 8L
+if (!exists("K_FOLDS"))    K_FOLDS    <- 4L
+if (!exists("FOLD_GAP"))   FOLD_GAP   <- 0L
+
+## ---------------------------------------------------------------------
+## [30.1] Settings
+## ---------------------------------------------------------------------
+EXIT_MODEL     <- cfg_get("EXIT_MODEL", "cat")      # what 26 will use; set after reading [30.6]
+ENV_WINDOW_Q   <- cfg_get("EXIT_ENV_WINDOW_Q", 8L)  # quarters for the merger-environment factor
+MIN_EXIT_POOL  <- cfg_get("MIN_EXIT_POOL", 200L)
+
+## Financial covariates. The panel from 20 carries assets only; these are
+## pulled from the .dta if the column names are known. Leave NULL to skip
+## the "logit_fin" candidate. [30.2] prints candidate column names so the
+## mapping can be filled in from the codebook.
+FIN_VARS <- cfg_get("FIN_VARS", NULL)
+##  e.g. FIN_VARS <- c(nw_ratio = "networth_ratio", roa = "roa",
+##                     delinq = "delinq_ratio", members = "members",
+##                     loans_shares = "loans_to_shares")
+
+DTA <- cfg_get("DTA", NULL)
+
+## Tree model: only if a package is already installed on this machine.
+## IT blocks new installs, so this is a check, not an install.
+TREE_PKG <- if (requireNamespace("ranger", quietly = TRUE)) "ranger" else
+            if (requireNamespace("randomForest", quietly = TRUE)) "randomForest" else
+            if (requireNamespace("xgboost", quietly = TRUE)) "xgboost" else NA
+cat("Tree package available:", if (is.na(TREE_PKG)) "none (tree candidate skipped)" else TREE_PKG, "\n")
+
+## ---------------------------------------------------------------------
+## [30.2] Financial covariates from the .dta (optional)
+## ---------------------------------------------------------------------
+if (!is.null(DTA) && file.exists(DTA) && is.null(FIN_VARS)) {
+  nms <- names(read_dta(DTA, n_max = 1))
+  pat <- "networth|net_worth|nw_|roa|return|delinq|dq_|member|loan|share|capital|earn|expense|yield"
+  cat("\nCandidate financial columns in the .dta (set FIN_VARS in the config to use them):\n")
+  print(grep(pat, nms, value = TRUE, ignore.case = TRUE))
+}
+
+if (!is.null(FIN_VARS)) {
+  fin <- read_dta(DTA, col_select = all_of(c("join_number", "year", "quarter", unname(FIN_VARS)))) %>%
+    mutate(across(everything(), ~ as.numeric(zap_labels(.x)))) %>%
+    rename(!!!setNames(unname(FIN_VARS), names(FIN_VARS))) %>%
+    mutate(q_index = (year - START_YEAR) * 4 + quarter) %>%
+    select(-year, -quarter)
+  ## Two-year change in members (or the first variable named), the
+  ## strongest single exit signal in most of the literature: shrinking
+  ## membership precedes voluntary merger.
+  key1 <- names(FIN_VARS)[1]
+  fin <- fin %>% arrange(join_number, q_index) %>% group_by(join_number) %>%
+    mutate(across(all_of(names(FIN_VARS)), ~ ifelse(is.finite(.x), .x, NA))) %>%
+    mutate(mem_chg8 = if ("members" %in% names(FIN_VARS))
+             log(pmax(members, 1)) - log(pmax(lag(members, 8), 1)) else NA_real_) %>%
+    ungroup()
+  feat <- feat %>% select(-any_of(c(names(FIN_VARS), "mem_chg8"))) %>%
+    left_join(fin, by = c("join_number", "q_index"))
+  cat("Financial covariates joined:", paste(names(FIN_VARS), collapse = ", "), "\n")
+}
+
+## ---------------------------------------------------------------------
+## [30.3] Candidate models. Each is a function(train, test, h) that
+## returns a predicted exit probability for every test row.
+## ---------------------------------------------------------------------
+cat_rate <- function(train, test) {
+  r <- train %>% group_by(cat_k) %>% summarise(rate = mean(ex), n = n(), .groups = "drop")
+  for (k in seq_len(N_CAT)) if (!(k %in% r$cat_k) || r$n[r$cat_k == k] < MIN_EXIT_POOL) {
+    src <- r %>% filter(cat_k < k, n >= MIN_EXIT_POOL) %>% arrange(desc(cat_k))
+    if (nrow(src)) r <- bind_rows(r %>% filter(cat_k != k),
+                                  data.frame(cat_k = k, rate = src$rate[1], n = 0L))
+  }
+  r$rate[match(test$cat_k, r$cat_k)]
+}
+
+## Merger-environment factor: exits in the ENV_WINDOW_Q quarters before
+## the test origin, relative to the long-run rate over the same window
+## length. Uses the one-quarter-ahead exit flag so the window closes
+## before the origin. A period effect, applied to every institution.
+## Measured on ONE-YEAR exits (exit_h4), whatever the horizon being
+## forecast, so the window is as close to the origin as the data allow:
+## origins in the ENV_WINDOW_Q quarters ending four quarters before the
+## test origin, against the long-run one-year rate over all earlier
+## origins. Clamped to [0.5, 2]: it is an environment factor, not a
+## forecast of its own.
+env_factor <- function(origin) {
+  us  <- feat$usable_h4 & feat$q_index <= origin - 4L
+  e1  <- feat$exit_h4[us]; q1 <- feat$q_index[us]
+  recent <- e1[q1 > origin - 4L - ENV_WINDOW_Q]
+  if (length(recent) < 500 || length(e1) < 5000) return(1)
+  min(max(mean(recent) / mean(e1), 0.5), 2)
+}
+
+m_cat      <- function(tr, te, h) cat_rate(tr, te)
+m_cat_env  <- function(tr, te, h) cat_rate(tr, te) * env_factor(min(te$q_index))
+
+rhs_base <- "y + d_dn + g12 + g20 + vol + hist_len + cat_f + region + cu_type + acq_cum + shock_now + shock_trail"
+m_logit <- function(tr, te, h) {
+  m <- tryCatch(suppressWarnings(glm(as.formula(paste("ex ~", rhs_base)), data = tr,
+                                     family = binomial())), error = function(e) NULL)
+  if (is.null(m)) return(rep(NA_real_, nrow(te)))
+  predict(m, newdata = te, type = "response")
+}
+
+rhs_fin <- paste(rhs_base, "+ ns(q_index, 3)",
+                 if (!is.null(FIN_VARS)) paste("+", paste(c(names(FIN_VARS), "mem_chg8"), collapse = " + ")) else "")
+m_logit_fin <- function(tr, te, h) {
+  ok_tr <- complete.cases(tr[, c(names(FIN_VARS), "mem_chg8"), drop = FALSE])
+  m <- tryCatch(suppressWarnings(glm(as.formula(paste("ex ~", rhs_fin)), data = tr[ok_tr, ],
+                                     family = binomial())), error = function(e) NULL)
+  if (is.null(m)) return(rep(NA_real_, nrow(te)))
+  p <- rep(NA_real_, nrow(te))
+  ok_te <- complete.cases(te[, c(names(FIN_VARS), "mem_chg8"), drop = FALSE])
+  p[ok_te] <- predict(m, newdata = te[ok_te, ], type = "response")
+  ## rows with missing financials fall back to the category rate
+  p[!ok_te] <- cat_rate(tr, te[!ok_te, ])
+  p
+}
+
+tree_vars <- c("y", "d_dn", "g12", "g20", "vol", "hist_len", "cat_k", "region",
+               "cu_type", "acq_cum", "shock_now", "shock_trail",
+               if (!is.null(FIN_VARS)) c(names(FIN_VARS), "mem_chg8"))
+
+## ---- tuning ---------------------------------------------------------
+## Small grid, tuned INSIDE the training fold on a temporal holdout (the
+## last TUNE_HOLD_Q origins of the training data, with an h-quarter gap),
+## scored on Brier -- the calibration score, since counts are the target.
+## The test fold never sees the tuning. Grids are kept small on purpose:
+## exits are rare events, trees overfit them readily, and a wide grid
+## tuned on the same folds it is scored on would flatter the tree for the
+## wrong reason. Widen only if the tuned setting sits at a grid edge.
+TUNE_HOLD_Q <- cfg_get("TUNE_HOLD_Q", 8L)
+GRID_RF  <- expand.grid(min.node.size = c(25, 100, 400), mtry_frac = c(0.33, 0.6))
+GRID_XGB <- expand.grid(max_depth = c(2, 3, 4), eta = c(0.03, 0.1),
+                        min_child_weight = c(20, 100))
+XGB_MAX_ROUNDS <- 600L      # early stopping on the holdout decides the actual number
+
+tune_split <- function(tr, h) {
+  o_max <- max(tr$q_index)
+  hold  <- tr$q_index > o_max - TUNE_HOLD_Q
+  fit   <- tr$q_index <= o_max - TUNE_HOLD_Q - h      # embargo h quarters
+  list(fit = fit, hold = hold)
+}
+
+fit_tree <- function(X, yv, params) {
+  if (TREE_PKG == "ranger") {
+    ranger::ranger(x = X, y = factor(yv), probability = TRUE, num.trees = 400,
+                   min.node.size = params$min.node.size,
+                   mtry = max(1L, floor(params$mtry_frac * ncol(X))), seed = 1)
+  } else if (TREE_PKG == "randomForest") {
+    randomForest::randomForest(x = X, y = factor(yv), ntree = 400,
+                               nodesize = params$min.node.size,
+                               mtry = max(1L, floor(params$mtry_frac * ncol(X))))
+  } else {
+    xgboost::xgboost(data = as.matrix(X), label = yv, nrounds = params$nrounds,
+                     eta = params$eta, max_depth = params$max_depth,
+                     min_child_weight = params$min_child_weight,
+                     subsample = 0.8, colsample_bytree = 0.8,
+                     objective = "binary:logistic", verbose = 0)
+  }
+}
+pred_tree <- function(m, Xt) {
+  if (TREE_PKG == "ranger") predict(m, data = Xt)$predictions[, "1"]
+  else if (TREE_PKG == "randomForest") predict(m, newdata = Xt, type = "prob")[, "1"]
+  else predict(m, as.matrix(Xt))
+}
+
+tune_tree <- function(tr, h) {
+  sp <- tune_split(tr, h)
+  X  <- tr[, tree_vars]; ok <- complete.cases(X)
+  fit <- ok & sp$fit; hold <- ok & sp$hold
+  if (sum(fit) < 5000 || sum(hold) < 500) return(NULL)
+  Xf <- X[fit, ]; yf <- tr$ex[fit]; Xh <- X[hold, ]; yh <- tr$ex[hold]
+  if (TREE_PKG == "xgboost") {
+    best <- NULL
+    for (i in seq_len(nrow(GRID_XGB))) {
+      g <- GRID_XGB[i, ]
+      m <- xgboost::xgb.train(
+        params = list(objective = "binary:logistic", eta = g$eta, max_depth = g$max_depth,
+                      min_child_weight = g$min_child_weight, subsample = 0.8,
+                      colsample_bytree = 0.8, eval_metric = "logloss"),
+        data = xgboost::xgb.DMatrix(as.matrix(Xf), label = yf),
+        nrounds = XGB_MAX_ROUNDS, early_stopping_rounds = 30, verbose = 0,
+        watchlist = list(hold = xgboost::xgb.DMatrix(as.matrix(Xh), label = yh)))
+      br <- mean((predict(m, as.matrix(Xh), iteration_range = c(1, m$best_iteration)) - yh)^2)
+      if (is.null(best) || br < best$brier)
+        best <- list(brier = br, params = list(eta = g$eta, max_depth = g$max_depth,
+                                               min_child_weight = g$min_child_weight,
+                                               nrounds = m$best_iteration))
+    }
+  } else {
+    best <- NULL
+    for (i in seq_len(nrow(GRID_RF))) {
+      g <- GRID_RF[i, ]
+      m <- fit_tree(Xf, yf, list(min.node.size = g$min.node.size, mtry_frac = g$mtry_frac))
+      br <- mean((pred_tree(m, Xh) - yh)^2)
+      if (is.null(best) || br < best$brier)
+        best <- list(brier = br, params = list(min.node.size = g$min.node.size,
+                                               mtry_frac = g$mtry_frac))
+    }
+  }
+  best
+}
+
+TUNE_LOG <- list()
+m_tree <- function(tr, te, h) {
+  if (is.na(TREE_PKG)) return(rep(NA_real_, nrow(te)))
+  tuned <- tune_tree(tr, h)
+  if (is.null(tuned)) return(rep(NA_real_, nrow(te)))
+  TUNE_LOG[[length(TUNE_LOG) + 1]] <<- data.frame(h = h, origin = min(te$q_index),
+                                                   as.data.frame(tuned$params),
+                                                   hold_brier = tuned$brier)
+  X  <- tr[, tree_vars]; Xt <- te[, tree_vars]
+  ok <- complete.cases(X); okt <- complete.cases(Xt)
+  m  <- fit_tree(X[ok, ], tr$ex[ok], tuned$params)
+  p  <- rep(NA_real_, nrow(te))
+  p[okt]  <- pred_tree(m, Xt[okt, ])
+  p[!okt] <- cat_rate(tr, te[!okt, ])
+  p
+}
+
+CANDS <- list(cat = m_cat, cat_env = m_cat_env, logit = m_logit)
+if (!is.null(FIN_VARS)) CANDS$logit_fin <- m_logit_fin
+if (!is.na(TREE_PKG))   CANDS$tree      <- m_tree
+
+## ---------------------------------------------------------------------
+## [30.4] Blocked-origin cross-validation, all candidates, all horizons
+## ---------------------------------------------------------------------
+auc <- function(p, y) {           # Mann-Whitney, base R
+  if (length(unique(y)) < 2) return(NA_real_)
+  r <- rank(p); n1 <- sum(y == 1); n0 <- sum(y == 0)
+  (sum(r[y == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+}
+
+rows <- list()
+for (h in H_SET) {
+  us  <- feat[[paste0("usable_h", h)]]
+  d_h <- feat[us, ] %>% mutate(ex = .data[[paste0("exit_h", h)]])
+  for (f in make_folds(h)) {
+    tr <- d_h[d_h$q_index <= f$train_max_origin, ]
+    te <- d_h[d_h$q_index %in% f$test, ]
+    if (nrow(tr) < 5000 || nrow(te) < 200) next
+    for (nm in names(CANDS)) {
+      p <- CANDS[[nm]](tr, te, h)
+      if (all(is.na(p))) next
+      p <- pmin(pmax(p, 0), 1)
+      by_cat <- te %>% mutate(p = p) %>% group_by(cat_k) %>%
+        summarise(n = n(), pred = sum(p), act = sum(ex), .groups = "drop")
+      rows[[length(rows) + 1]] <- data.frame(
+        h = h, fold = f$test[1], model = nm,
+        n = nrow(te), brier = mean((p - te$ex)^2), auc = auc(p, te$ex),
+        pred = sum(p), act = sum(te$ex),
+        cat_mape = mean(abs(by_cat$pred - by_cat$act) / pmax(by_cat$act, 1)),
+        stringsAsFactors = FALSE)
+    }
+    cat(sprintf("h=%2d fold@%d done\n", h, f$test[1]))
+  }
+}
+cv_exit <- bind_rows(rows)
+
+if (length(TUNE_LOG)) {
+  tune_log <- bind_rows(TUNE_LOG)
+  cat("\nTree settings chosen per fold (tuned on a holdout inside the training data):\n")
+  print(tune_log, row.names = FALSE)
+  cat("If a setting sits at the edge of its grid in most folds, widen the grid there.\n")
+}
+
+## ---------------------------------------------------------------------
+## [30.5] Results
+## ---------------------------------------------------------------------
+summ <- cv_exit %>% group_by(h, model) %>%
+  summarise(folds = n(),
+            brier = round(mean(brier), 5),
+            auc   = round(mean(auc, na.rm = TRUE), 3),
+            ratio = round(sum(pred) / sum(act), 2),          # level: 1.00 is perfect
+            cat_mape = round(100 * mean(cat_mape), 1),      # allocation: lower is better
+            .groups = "drop") %>%
+  arrange(h, model)
+cat("\n=== Exit-hazard candidates, blocked-origin CV ===\n",
+    "ratio    = predicted / actual exits (level)\n",
+    "cat_mape = mean abs % error of exits by category (allocation)\n",
+    "auc      = ranking quality (0.5 = none)\n\n")
+for (hh in H_SET) {
+  cat("h =", hh, "\n")
+  print(summ %>% filter(h == hh) %>% select(-h) %>% as.data.frame(), row.names = FALSE)
+}
+
+## ---------------------------------------------------------------------
+## [30.6] Verdict
+## ---------------------------------------------------------------------
+## Pick on the count-relevant score: closest level ratio to 1 at five
+## years, with allocation error as the tie-break. Discrimination (AUC) is
+## reported but does not decide -- see the header.
+v5 <- summ %>% filter(h == 20) %>%
+  mutate(level_err = abs(ratio - 1)) %>% arrange(level_err, cat_mape)
+best <- v5$model[1]
+cat(sprintf("\nVerdict at five years: '%s' (level ratio %.2f, allocation error %.1f%%).\n",
+            best, v5$ratio[1], v5$cat_mape[1]))
+base5 <- v5 %>% filter(model == "cat")
+cat(sprintf("Baseline 'cat': level ratio %.2f, allocation error %.1f%%.\n",
+            base5$ratio, base5$cat_mape))
+if (best != "cat") {
+  cat("A richer model beats the category rate on the scores that matter for counts.\n",
+      "Set EXIT_MODEL <- \"", best, "\" in the config and re-run 26 -> 27.\n", sep = "")
+} else {
+  cat("The category rate holds up. The level miss in 26 is a period effect --\n",
+      "use EXIT_BASIS = \"recent\" (already set) rather than a covariate model.\n")
+}
+
+## ---------------------------------------------------------------------
+## [30.7] Cohort predictions for 26, whichever model is chosen
+## ---------------------------------------------------------------------
+## Fit each candidate on ALL usable history and score the cohort. 26
+## reads P_EXIT_ALT[[EXIT_MODEL]] when EXIT_MODEL != "cat".
+fc_rows_now <- feat %>% filter(q_index == N_Q) %>%
+  semi_join(fc %>% select(join_number), by = "join_number")
+P_EXIT_ALT <- list()
+for (nm in names(CANDS)) {
+  P_EXIT_ALT[[nm]] <- lapply(H_SET, function(h) {
+    us <- feat[[paste0("usable_h", h)]]
+    tr <- feat[us, ] %>% mutate(ex = .data[[paste0("exit_h", h)]])
+    te <- fc_rows_now
+    p  <- CANDS[[nm]](tr, te, h)
+    p  <- pmin(pmax(p, 0), 1)
+    p[match(fc$join_number, te$join_number)]
+  })
+  names(P_EXIT_ALT[[nm]]) <- as.character(H_SET)
+}
+cat("\nCohort exit probabilities computed for:", paste(names(P_EXIT_ALT), collapse = ", "), "\n")
+cat("Expected five-year exits by model:",
+    paste(sprintf("%s %.0f", names(P_EXIT_ALT),
+                  sapply(P_EXIT_ALT, function(x) sum(x[["20"]], na.rm = TRUE))), collapse = " | "), "\n")
+
+saveRDS(list(cv_exit = cv_exit, summ = summ, verdict = best,
+             P_EXIT_ALT = P_EXIT_ALT, CANDS = names(CANDS),
+             FIN_VARS = FIN_VARS, TREE_PKG = TREE_PKG,
+             ENV_WINDOW_Q = ENV_WINDOW_Q, rhs_base = rhs_base, rhs_fin = rhs_fin,
+             tune_log = if (length(TUNE_LOG)) bind_rows(TUNE_LOG) else NULL,
+             GRID_RF = GRID_RF, GRID_XGB = GRID_XGB),
+        file = "panel_exit_models.rds")
+cat("Saved panel_exit_models.rds.\n")
