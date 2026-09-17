@@ -59,7 +59,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-17d"
+SCRIPT30_VERSION <- "2026-09-17e"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
@@ -276,6 +276,24 @@ pred_tree <- function(m, Xt) {
 ## versions (m$best_iteration, 1-based; xgb.attr(m, "best_iteration"),
 ## 0-based; or absent). Read it tolerantly and fall back to the rounds
 ## actually trained. Off by one is immaterial here.
+XGB_NEW_API <- !is.na(TREE_PKG) && TREE_PKG == "xgboost" &&
+               packageVersion("xgboost") >= "2.1.0"
+if (!is.na(TREE_PKG) && TREE_PKG == "xgboost")
+  cat("xgboost version", as.character(packageVersion("xgboost")),
+      if (XGB_NEW_API) "(new API: evals=)" else "(old API: watchlist=)", "\n")
+
+xgb_train_es <- function(Xf, yf, Xh, yh, prm) {
+  dtr <- xgboost::xgb.DMatrix(num_mat(Xf), label = yf)
+  dho <- xgboost::xgb.DMatrix(num_mat(Xh), label = yh)
+  if (XGB_NEW_API) {
+    xgboost::xgb.train(params = prm, data = dtr, nrounds = XGB_MAX_ROUNDS,
+                       evals = list(hold = dho), early_stopping_rounds = 30, verbose = 0)
+  } else {
+    xgboost::xgb.train(params = prm, data = dtr, nrounds = XGB_MAX_ROUNDS,
+                       watchlist = list(hold = dho), early_stopping_rounds = 30, verbose = 0)
+  }
+}
+
 xgb_best <- function(m) {
   b <- tryCatch(m$best_iteration, error = function(e) NULL)
   if (is.null(b) || !length(b) || is.na(b))
@@ -296,13 +314,10 @@ tune_tree <- function(tr, h) {
     best <- NULL
     for (i in seq_len(nrow(GRID_XGB))) {
       g <- GRID_XGB[i, ]
-      m <- xgboost::xgb.train(
-        params = list(objective = "binary:logistic", eta = g$eta, max_depth = g$max_depth,
-                      min_child_weight = g$min_child_weight, subsample = 0.8,
-                      colsample_bytree = 0.8, eval_metric = "logloss"),
-        data = xgboost::xgb.DMatrix(num_mat(Xf), label = yf),
-        nrounds = XGB_MAX_ROUNDS, early_stopping_rounds = 30, verbose = 0,
-        watchlist = list(hold = xgboost::xgb.DMatrix(num_mat(Xh), label = yh)))
+      m <- xgb_train_es(Xf, yf, Xh, yh,
+             list(objective = "binary:logistic", eta = g$eta, max_depth = g$max_depth,
+                  min_child_weight = g$min_child_weight, subsample = 0.8,
+                  colsample_bytree = 0.8, eval_metric = "logloss"))
       ## after early stopping, predict() uses the best iteration by default
       ## in every xgboost R version, so no iteration argument is passed
       br <- mean((predict(m, num_mat(Xh)) - yh)^2)
@@ -326,8 +341,22 @@ tune_tree <- function(tr, h) {
 }
 
 TUNE_LOG <- list()
+TREE_ERRORS <- list()
 m_tree <- function(tr, te, h) {
   if (is.na(TREE_PKG)) return(rep(NA_real_, nrow(te)))
+  ## Fail soft: a tree problem must not take the other candidates down.
+  ## The error is printed and logged so it can be fixed, and the fold is
+  ## scored without the tree.
+  out <- tryCatch(m_tree_core(tr, te, h), error = function(e) {
+    msg <- conditionMessage(e)
+    cat("  [tree skipped, h=", h, "] ", msg, "\n", sep = "")
+    TREE_ERRORS[[length(TREE_ERRORS) + 1]] <<- data.frame(h = h, origin = min(te$q_index),
+                                                          error = msg)
+    rep(NA_real_, nrow(te))
+  })
+  out
+}
+m_tree_core <- function(tr, te, h) {
   tuned <- tune_tree(tr, h)
   if (is.null(tuned)) return(rep(NA_real_, nrow(te)))
   prm <- lapply(tuned$params, function(x) if (is.null(x) || !length(x)) NA else x[1])
@@ -363,6 +392,8 @@ if (!is.na(TREE_PKG) && any(grepl("as.matrix", deparse(tune_tree), fixed = TRUE)
   stop("Stale tune_tree() in session. Run rm(tune_tree, fit_tree, pred_tree, m_tree) ",
        "and re-run this script from [30.3]. Loaded file version: ", SCRIPT30_VERSION)
 
+cat("Running [30.4] with script version", SCRIPT30_VERSION, "| candidates:",
+    paste(names(CANDS), collapse = ", "), "\n")
 rows <- list()
 for (h in H_SET) {
   us  <- feat[[paste0("usable_h", h)]]
@@ -389,6 +420,10 @@ for (h in H_SET) {
 }
 cv_exit <- bind_rows(rows)
 
+if (length(TREE_ERRORS)) {
+  cat("\nTree candidate errors (tree skipped on these folds):\n")
+  print(bind_rows(TREE_ERRORS), row.names = FALSE)
+}
 if (length(TUNE_LOG)) {
   tune_log <- bind_rows(TUNE_LOG)
   cat("\nTree settings chosen per fold (tuned on a holdout inside the training data):\n")
