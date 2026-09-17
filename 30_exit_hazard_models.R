@@ -59,6 +59,8 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
+SCRIPT30_VERSION <- "2026-09-17c"
+cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
 if (!exists("fc"))   { prb <- readRDS("panel_probs.rds"); list2env(prb, .GlobalEnv) }
@@ -67,6 +69,24 @@ stopifnot(exists("feat"), exists("make_folds"), exists("fc"), exists("H_SET"),
 if (!exists("FOLD_WIDTH")) FOLD_WIDTH <- 8L
 if (!exists("K_FOLDS"))    K_FOLDS    <- 4L
 if (!exists("FOLD_GAP"))   FOLD_GAP   <- 0L
+
+## Make every feature the trees use numeric at the source. region and
+## cu_type arrive as character/factor; as.matrix() on a frame containing
+## them turns the whole matrix to character, which xgboost rejects. Coding
+## them here means the matrix is numeric no matter which function builds
+## it. The codes are kept for reference.
+for (v in c("region", "cu_type")) {
+  if (!is.numeric(feat[[v]])) {
+    lev <- sort(unique(as.character(feat[[v]])))
+    feat[[paste0(v, "_lab")]] <- as.character(feat[[v]])
+    feat[[v]] <- as.numeric(factor(as.character(feat[[v]]), levels = lev))
+    cat(sprintf("feat$%s coded numeric: %s\n", v,
+                paste(sprintf("%d=%s", seq_along(lev), lev), collapse = ", ")))
+  }
+}
+if (exists("fc")) for (v in c("region", "cu_type"))
+  if (!is.numeric(fc[[v]])) fc[[v]] <- as.numeric(factor(as.character(fc[[v]]),
+    levels = sort(unique(as.character(feat[[paste0(v, "_lab")]])))))
 
 ## ---------------------------------------------------------------------
 ## [30.1] Settings
@@ -158,7 +178,9 @@ env_factor <- function(origin) {
 m_cat      <- function(tr, te, h) cat_rate(tr, te)
 m_cat_env  <- function(tr, te, h) cat_rate(tr, te) * env_factor(min(te$q_index))
 
-rhs_base <- "y + d_dn + g12 + g20 + vol + hist_len + cat_f + region + cu_type + acq_cum + shock_now + shock_trail"
+## region and cu_type are numeric codes from [30.0]; the logit must still
+## treat them as categories, hence factor() in the formula.
+rhs_base <- "y + d_dn + g12 + g20 + vol + hist_len + cat_f + factor(region) + factor(cu_type) + acq_cum + shock_now + shock_trail"
 m_logit <- function(tr, te, h) {
   m <- tryCatch(suppressWarnings(glm(as.formula(paste("ex ~", rhs_base)), data = tr,
                                      family = binomial())), error = function(e) NULL)
@@ -316,6 +338,13 @@ auc <- function(p, y) {           # Mann-Whitney, base R
   r <- rank(p); n1 <- sum(y == 1); n0 <- sum(y == 0)
   (sum(r[y == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
 }
+
+## Guard against stale function definitions left in the session by an
+## earlier version of this script: the tuning code must not build its
+## matrix with as.matrix().
+if (!is.na(TREE_PKG) && any(grepl("as.matrix", deparse(tune_tree), fixed = TRUE)))
+  stop("Stale tune_tree() in session. Run rm(tune_tree, fit_tree, pred_tree, m_tree) ",
+       "and re-run this script from [30.3]. Loaded file version: ", SCRIPT30_VERSION)
 
 rows <- list()
 for (h in H_SET) {
