@@ -206,6 +206,27 @@ tune_split <- function(tr, h) {
   list(fit = fit, hold = hold)
 }
 
+## xgboost wants a numeric matrix; as.matrix() on a data frame with any
+## character or factor column (region, cu_type) coerces everything to
+## character. Code non-numeric columns as integers -- trees split on them
+## as unordered categories anyway. Levels are fixed from the full feature
+## table so train and test code identically.
+LEVELS <- lapply(tree_vars, function(v) {
+  x <- feat[[v]]
+  if (is.numeric(x)) NULL else sort(unique(as.character(x)))
+})
+names(LEVELS) <- tree_vars
+num_mat <- function(D) {
+  M <- sapply(tree_vars, function(v) {
+    x <- D[[v]]
+    if (is.null(LEVELS[[v]])) as.numeric(x)
+    else as.numeric(factor(as.character(x), levels = LEVELS[[v]]))
+  })
+  if (is.null(dim(M))) M <- matrix(M, nrow = 1, dimnames = list(NULL, tree_vars))
+  storage.mode(M) <- "double"
+  M
+}
+
 fit_tree <- function(X, yv, params) {
   if (TREE_PKG == "ranger") {
     ranger::ranger(x = X, y = factor(yv), probability = TRUE, num.trees = 400,
@@ -216,7 +237,7 @@ fit_tree <- function(X, yv, params) {
                                nodesize = params$min.node.size,
                                mtry = max(1L, floor(params$mtry_frac * ncol(X))))
   } else {
-    xgboost::xgboost(data = as.matrix(X), label = yv, nrounds = params$nrounds,
+    xgboost::xgboost(data = num_mat(X), label = yv, nrounds = params$nrounds,
                      eta = params$eta, max_depth = params$max_depth,
                      min_child_weight = params$min_child_weight,
                      subsample = 0.8, colsample_bytree = 0.8,
@@ -226,7 +247,7 @@ fit_tree <- function(X, yv, params) {
 pred_tree <- function(m, Xt) {
   if (TREE_PKG == "ranger") predict(m, data = Xt)$predictions[, "1"]
   else if (TREE_PKG == "randomForest") predict(m, newdata = Xt, type = "prob")[, "1"]
-  else predict(m, as.matrix(Xt))
+  else predict(m, num_mat(Xt))
 }
 
 tune_tree <- function(tr, h) {
@@ -243,10 +264,10 @@ tune_tree <- function(tr, h) {
         params = list(objective = "binary:logistic", eta = g$eta, max_depth = g$max_depth,
                       min_child_weight = g$min_child_weight, subsample = 0.8,
                       colsample_bytree = 0.8, eval_metric = "logloss"),
-        data = xgboost::xgb.DMatrix(as.matrix(Xf), label = yf),
+        data = xgboost::xgb.DMatrix(num_mat(Xf), label = yf),
         nrounds = XGB_MAX_ROUNDS, early_stopping_rounds = 30, verbose = 0,
-        watchlist = list(hold = xgboost::xgb.DMatrix(as.matrix(Xh), label = yh)))
-      br <- mean((predict(m, as.matrix(Xh), iteration_range = c(1, m$best_iteration)) - yh)^2)
+        watchlist = list(hold = xgboost::xgb.DMatrix(num_mat(Xh), label = yh)))
+      br <- mean((predict(m, num_mat(Xh), iteration_range = c(1, m$best_iteration)) - yh)^2)
       if (is.null(best) || br < best$brier)
         best <- list(brier = br, params = list(eta = g$eta, max_depth = g$max_depth,
                                                min_child_weight = g$min_child_weight,
