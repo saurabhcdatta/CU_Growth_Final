@@ -59,7 +59,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-17c"
+SCRIPT30_VERSION <- "2026-09-17d"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
@@ -272,6 +272,20 @@ pred_tree <- function(m, Xt) {
   else predict(m, num_mat(Xt))
 }
 
+## xgboost's R API has moved the early-stopping result around between
+## versions (m$best_iteration, 1-based; xgb.attr(m, "best_iteration"),
+## 0-based; or absent). Read it tolerantly and fall back to the rounds
+## actually trained. Off by one is immaterial here.
+xgb_best <- function(m) {
+  b <- tryCatch(m$best_iteration, error = function(e) NULL)
+  if (is.null(b) || !length(b) || is.na(b))
+    b <- suppressWarnings(as.integer(xgboost::xgb.attr(m, "best_iteration"))) + 1L
+  if (is.null(b) || !length(b) || is.na(b))
+    b <- tryCatch(m$niter, error = function(e) NULL)
+  if (is.null(b) || !length(b) || is.na(b)) b <- XGB_MAX_ROUNDS
+  max(1L, as.integer(b))
+}
+
 tune_tree <- function(tr, h) {
   sp <- tune_split(tr, h)
   X  <- tr[, tree_vars]; ok <- complete.cases(X)
@@ -289,11 +303,13 @@ tune_tree <- function(tr, h) {
         data = xgboost::xgb.DMatrix(num_mat(Xf), label = yf),
         nrounds = XGB_MAX_ROUNDS, early_stopping_rounds = 30, verbose = 0,
         watchlist = list(hold = xgboost::xgb.DMatrix(num_mat(Xh), label = yh)))
-      br <- mean((predict(m, num_mat(Xh), iteration_range = c(1, m$best_iteration)) - yh)^2)
+      ## after early stopping, predict() uses the best iteration by default
+      ## in every xgboost R version, so no iteration argument is passed
+      br <- mean((predict(m, num_mat(Xh)) - yh)^2)
       if (is.null(best) || br < best$brier)
         best <- list(brier = br, params = list(eta = g$eta, max_depth = g$max_depth,
                                                min_child_weight = g$min_child_weight,
-                                               nrounds = m$best_iteration))
+                                               nrounds = xgb_best(m)))
     }
   } else {
     best <- NULL
@@ -314,8 +330,9 @@ m_tree <- function(tr, te, h) {
   if (is.na(TREE_PKG)) return(rep(NA_real_, nrow(te)))
   tuned <- tune_tree(tr, h)
   if (is.null(tuned)) return(rep(NA_real_, nrow(te)))
+  prm <- lapply(tuned$params, function(x) if (is.null(x) || !length(x)) NA else x[1])
   TUNE_LOG[[length(TUNE_LOG) + 1]] <<- data.frame(h = h, origin = min(te$q_index),
-                                                   as.data.frame(tuned$params),
+                                                   as.data.frame(prm),
                                                    hold_brier = tuned$brier)
   X  <- tr[, tree_vars]; Xt <- te[, tree_vars]
   ok <- complete.cases(X); okt <- complete.cases(Xt)
