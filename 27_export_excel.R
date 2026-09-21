@@ -44,6 +44,9 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 
+SCRIPT27_VERSION <- "2026-09-21a"
+cat("27_export_excel.R version", SCRIPT27_VERSION, "\n")
+
 ## The helpers live in the project root, not in Data. Search a few likely
 ## places rather than assuming, so this does not break when the working
 ## directory changes.
@@ -84,6 +87,18 @@ load_if_missing("panel_assign.rds",   "inst_out")
 load_if_missing("panel_backtest.rds", "count_tab")
 load_if_missing("panel_exit.rds",     "pop_counts")
 
+## ASSIGN_BASIS lives only in 24's session -- no .rds carries it. In a cold
+## session take it from the config, as 24 does, and confirm inst_out really
+## was labelled that way, so a restart cannot mislabel the workbook.
+if (!exists("ASSIGN_BASIS")) {
+  ASSIGN_BASIS <- cfg_get("ASSIGN_BASIS", "median")
+  if (ASSIGN_BASIS == "median" && exists("inst_out") && exists("BREAKS"))
+    stopifnot("inst_out is not labelled by median projected assets: re-run 24" =
+      identical(CAT_LABELS[pmin(pmax(findInterval(inst_out$assets_med_5y, BREAKS[-1]) + 1L, 1L), N_CAT)],
+                as.character(inst_out$cat_5y)))
+  cat("ASSIGN_BASIS taken from the config:", ASSIGN_BASIS, "\n")
+}
+
 missing <- setdiff(c("counts", "inst_out", "TRANS", "cell_counts", "movers",
                      "down_risk", "count_tab", "dir_tab", "acc_tab",
                      "A7_ONLY_CALIB", "A7_FACTORS", "A7_FACTOR_SCOPE",
@@ -108,27 +123,41 @@ stopifnot(nrow(inst_out) > 0, length(counts$cat) == N_CAT)
 ##   0.0432  ->  0.0432        6.4  ->  6.4        204364.2 -> 204,364.2
 ## This patches the styles sheet in memory. 0_xlsx_helpers.R is untouched;
 ## the patch is idempotent, so re-running the block is safe.
+##
+## THE SLOT IS LOOKED UP, NOT TYPED IN. A cell's style is the zero-based
+## position of its <xf> entry inside cellXfs. The new entry is appended
+## as the 12th, so its slot is 11. Until 2026-09-21 this block set
+## S_MIXED <- 10L, which is S_FLAGINT -- whole numbers on a yellow fill --
+## so every assets column was written in that style and an institution
+## under $0.5M displayed as 0, the very thing this format exists to
+## prevent. The slot is now read off the style sheet, and it is
+## recomputed on every run so a session still holding the old value is
+## corrected (29 takes S_MIXED from this session).
 ## ---------------------------------------------------------------------
-if (!exists("S_MIXED")) {
-  stopifnot(exists("styles_xml"))
-  if (!grepl("numFmtId=\"166\"", styles_xml, fixed = TRUE)) {
-    styles_xml <- sub('<numFmts count="2">',
-                      '<numFmts count="3">', styles_xml, fixed = TRUE)
-    styles_xml <- sub('<numFmt numFmtId="165" formatCode="0.00"/>',
-                      paste0('<numFmt numFmtId="165" formatCode="0.00"/>',
-                             '<numFmt numFmtId="166" formatCode="[&lt;1]0.0000;#,##0.0"/>'),
-                      styles_xml, fixed = TRUE)
-    styles_xml <- sub('<cellXfs count="11">',
-                      '<cellXfs count="12">', styles_xml, fixed = TRUE)
-    styles_xml <- sub('</cellXfs>',
-                      paste0('<xf numFmtId="166" fontId="0" fillId="0" borderId="0" ',
-                             'xfId="0" applyNumberFormat="1"/></cellXfs>'),
-                      styles_xml, fixed = TRUE)
-    assign("styles_xml", styles_xml, .GlobalEnv)
-  }
-  S_MIXED <- 10L   # zero-based index of the new xf (it is the 12th entry)
-  cat("Added the mixed-magnitude dollar format (S_MIXED).\n")
+stopifnot(exists("styles_xml"))
+if (!grepl("numFmtId=\"166\"", styles_xml, fixed = TRUE)) {
+  styles_xml <- sub('<numFmts count="2">',
+                    '<numFmts count="3">', styles_xml, fixed = TRUE)
+  styles_xml <- sub('<numFmt numFmtId="165" formatCode="0.00"/>',
+                    paste0('<numFmt numFmtId="165" formatCode="0.00"/>',
+                           '<numFmt numFmtId="166" formatCode="[&lt;1]0.0000;#,##0.0"/>'),
+                    styles_xml, fixed = TRUE)
+  styles_xml <- sub('<cellXfs count="11">',
+                    '<cellXfs count="12">', styles_xml, fixed = TRUE)
+  styles_xml <- sub('</cellXfs>',
+                    paste0('<xf numFmtId="166" fontId="0" fillId="0" borderId="0" ',
+                           'xfId="0" applyNumberFormat="1"/></cellXfs>'),
+                    styles_xml, fixed = TRUE)
+  assign("styles_xml", styles_xml, .GlobalEnv)
 }
+.cx <- sub("</cellXfs>.*$", "", sub("^.*<cellXfs[^>]*>", "", styles_xml))
+.xf <- regmatches(.cx, gregexpr("<xf [^>]*>", .cx))[[1]]
+S_MIXED <- which(grepl("numFmtId=\"166\"", .xf, fixed = TRUE))[1] - 1L
+stopifnot(!is.na(S_MIXED),
+          !(S_MIXED %in% c(S_NORM, S_HDR, S_TITLE, S_SUB, S_INT, S_DEC, S_FLAG,
+                           S_BOLD, S_INTBOLD, S_WRAP, S_FLAGINT)))
+cat("Mixed-magnitude dollar format (S_MIXED): style slot", S_MIXED, "of", length(.xf) - 1L, "\n")
+rm(.cx, .xf)
 
 ## ---------------------------------------------------------------------
 ## [27.1] Settings
@@ -223,6 +252,25 @@ ensure_ctx <- function() {
 }
 ensure_ctx()
 
+## How the exit rates behind the With Mergers tab are described in words,
+## wherever the workbook mentions them. It follows the model 26 actually
+## applied (EXIT_MODEL travels in panel_exit.rds) and is a function, not a
+## constant, so a block re-run after 26 has been re-run cannot print the
+## previous model's description.
+exit_words <- function() {
+  m <- if (exists("EXIT_MODEL", .GlobalEnv)) get("EXIT_MODEL", .GlobalEnv) else "cat"
+  how <- switch(m,
+    cat       = "the historical exit rate of its asset category",
+    cat_env   = "the long-run exit rate of its asset category, scaled by a system-wide merger-environment factor (the one-year exit rate of the last two years against its long-run average)",
+    cat_env2  = "the long-run exit rate of its asset category, scaled by that category's merger-environment factor (the category's one-year exit rate over the last two years against its own long-run average)",
+    size      = "a long-run exit rate that falls smoothly with asset size",
+    size_env  = "a long-run exit rate that falls smoothly with asset size, scaled by a system-wide merger-environment factor (the one-year exit rate of the last two years against its long-run average)",
+    size_env2 = "a long-run exit rate that falls smoothly with asset size, scaled by a merger-environment factor that itself varies with size",
+    "an exit probability from the model selected in script 30")
+  list(model = m, how = how,
+       adjusted = m %in% c("cat_env", "cat_env2", "size_env", "size_env2"))
+}
+
 ## ---------------------------------------------------------------------
 ## [27.3] Method -- continued
 ## ---------------------------------------------------------------------
@@ -297,7 +345,7 @@ method_notes <- c(
          format(nrow(feat), big.mark = ","), START_YEAR, qgrid$q_label[N_Q]),
  "",
  "THREE ASSUMPTIONS THE READER MUST KNOW",
- if (HAVE_EXIT) "1. TWO SETS OF COUNTS. The Total, Transitions and regional count tables hold every institution in the system (no mergers) so that they reconcile to the institution lists. The With Mergers tab and the matching block on each regional tab apply historical exit rates by category and show how many of today's institutions are expected still to be operating. Read the first for where institutions are heading, the second for how many there will be." else
+ if (HAVE_EXIT) sprintf("1. TWO SETS OF COUNTS. The Total, Transitions and regional count tables hold every institution in the system (no mergers) so that they reconcile to the institution lists. The With Mergers tab and the matching block on each regional tab allow for exits -- each institution's chance of merging or closing is %s -- and show how many of today's institutions are expected still to be operating. Read the first for where institutions are heading, the second for how many there will be.", exit_words()$how) else
  "1. NO MERGERS. The total is held fixed at the current count. Mergers have removed roughly 3.6% of credit unions a year, about a sixth over five years. These are not forecasts of how many credit unions will exist; they show where these institutions would land if all survived.",
  "2. THRESHOLDS ARE NOMINAL. The category edges are fixed dollar amounts that have never been indexed. Much of the projected movement is the erosion of those thresholds rather than credit unions changing size. See the Bucket Growth tab.",
  a7_method_note,
@@ -329,6 +377,12 @@ settings_tbl <- data.frame(
             ifelse(WEIGHTED, sprintf("half-life %d quarters", HALFLIFE), "none"),
             MIN_POOL, fmt_date),
   stringsAsFactors = FALSE)
+
+if (HAVE_EXIT)
+  settings_tbl <- rbind(settings_tbl,
+    data.frame(Setting = "Exit model (With Mergers tab)",
+               Value = paste0(exit_words()$model, " -- ", exit_words()$how),
+               stringsAsFactors = FALSE))
 
 SH[[length(SH) + 1]] <- mk_sheet(
   "Method", "Credit Union Growth Forecast",
@@ -568,10 +622,59 @@ if (HAVE_EXIT) {
   for (hl in H_LAB) tot_row[[hl]] <- sum(exit_tbl[[hl]])
   exit_tbl <- bind_rows(exit_tbl, tot_row)
 
-  rate_tbl <- exit_rates %>%
-    transmute(Category = CAT_PRETTY[cat], Horizon = H_LAB[match(h, H_SET)],
-              `Share exiting within horizon (%)` = rate_pct,
-              `Per year (%)` = annual_pct, Observations = n)
+  ## "Exit rates used" must be the rates USED. Under a model from 30 those
+  ## are not 26's exit_rates table (applied only under "cat") but
+  ## exit_rates_applied from [26.4b]: the average exit probability over
+  ## today's institutions in each category. Institutions today x that rate
+  ## = the expected exits in the block above, so the tab ties.
+  ew <- exit_words()
+  if (exists("exit_rates_applied")) {
+    rate_tbl <- exit_rates_applied %>%
+      transmute(Category = CAT_PRETTY[cat], Horizon = H_LAB[match(h, H_SET)],
+                `Institutions today` = n_inst,
+                `Long-run share exiting (%)` = base_pct,
+                `Applied / long-run` = uplift,
+                `Share exiting, as applied (%)` = rate_pct,
+                `Per year, as applied (%)` = annual_pct)
+    rate_sty  <- c(S_NORM, S_NORM, S_INT, S_DEC, S_DEC, S_DEC, S_DEC)
+    rate_head <- "Exit rates used: the long-run rate, the ratio applied to it, and the rate as applied (institutions today x the applied rate = expected exits from that category)"
+    upl <- exit_rates_applied$uplift[exit_rates_applied$h == max(H_SET)]
+  } else {
+    if (ew$model != "cat")
+      warning("panel_exit.rds was written by a 26 older than 2026-09-21a and has no exit_rates_applied: ",
+              "the rates block shows 26's own category rates, which are NOT the rates applied under '",
+              ew$model, "'. Re-run 26, then 27.")
+    rate_tbl <- exit_rates %>%
+      transmute(Category = CAT_PRETTY[cat], Horizon = H_LAB[match(h, H_SET)],
+                `Share exiting within horizon (%)` = rate_pct,
+                `Per year (%)` = annual_pct, Observations = n)
+    rate_sty  <- c(S_NORM, S_NORM, S_DEC, S_DEC, S_INT)
+    rate_head <- if (ew$model == "cat") "Exit rates used" else
+      "Category exit rates estimated in script 26 -- NOT the rates applied; re-run 26"
+    upl <- NA_real_
+  }
+  upl_txt <- if (ew$adjusted && any(is.finite(upl)))
+    sprintf(" At %s the ratio of applied to long-run rates runs from %.2f to %.2f across the categories (the 'Applied / long-run' column below).",
+            qgrid$q_label[N_Q], min(upl, na.rm = TRUE), max(upl, na.rm = TRUE)) else ""
+  exit_note <- paste0(
+    if (ew$model == "cat")
+      sprintf("Exit rates depend on asset category only, estimated from %s: the share of credit unions in each category that merged away or closed within one, three and five years.",
+              if (exists("EXIT_BASIS") && identical(EXIT_BASIS, "recent") && exists("EXIT_RECENT_Q"))
+                sprintf("the last %d years of the record", as.integer(EXIT_RECENT_Q / 4)) else "the record since 2005")
+    else if (ew$model == "cat_env2")
+      "Exit rates start from the long-run record -- the share of credit unions in each asset category, at any date since 2005, that merged away or closed within one, three and five years -- and are then scaled category by category for the current pace of mergers: the category's one-year exit rate over the last two years divided by its own long-run one-year rate, pulled toward the system-wide figure where a category has few institutions."
+    else if (ew$model == "cat_env")
+      "Exit rates start from the long-run record -- the share of credit unions in each asset category, at any date since 2005, that merged away or closed within one, three and five years -- and are then scaled by one system-wide factor for the current pace of mergers: the one-year exit rate over the last two years divided by its long-run average."
+    else
+      sprintf("Each institution's chance of exiting is %s, estimated from the record of every credit union since 2005.", ew$how),
+    upl_txt,
+    " Small institutions exit far more often than large ones. New charters are not included (a handful a year).")
+
+  ## The backtest block is headed by what 26 says it tested ([26.3]).
+  bt_head <- paste0("Backtest: exits predicted from past dates vs actual by the cohort date",
+                    if (exists("BT_NOTE")) paste0(" -- tested: ", BT_NOTE) else "")
+  if (exists("BT_MODEL") && !identical(BT_MODEL, ew$model))
+    warning("26 back-tested '", BT_MODEL, "' but the counts use '", ew$model, "'. Re-run 26 from the top, then 27.")
 
   bt_tbl <- exit_bt_tot %>%
     transmute(Horizon = H_LAB[match(h, H_SET)], Origin = origin,
@@ -583,8 +686,8 @@ if (HAVE_EXIT) {
     sprintf("All %s institutions at %s. Totals FALL as institutions leave.",
             format(nrow(inst_out), big.mark = ","), qgrid$q_label[N_Q]),
     notes = c(
-      "The Total tab holds every institution in the system; this tab does not. Each institution's category probabilities are multiplied by its category's historical survival rate, and the remainder is counted as merged or closed. 'Still operating' is the number of today's credit unions expected to exist at each date.",
-      "Exit rates depend on asset category only, estimated from every credit union since 2005: the share in each category that merged away or closed within one, three and five years. Small institutions exit far more often than large ones. New charters are not included (a handful a year).",
+      "The Total tab holds every institution in the system; this tab does not. Each institution's category is weighted by its chance of still operating at each date, and the remainder is counted as merged or closed. 'Still operating' is the number of today's credit unions expected to exist at each date.",
+      exit_note,
       "These are expected counts, rounded to whole numbers. Unlike the Total and regional tabs they cannot be reproduced by counting a list: no institution is identified as likely to merge, and no such column exists anywhere in this workbook. A category-level rate says nothing about any particular credit union.",
       "The regional tabs carry a matching block. Because each is rounded to its own cell, the eight blocks can differ from this table by one or two institutions in a category."),
     blocks = list(
@@ -594,9 +697,8 @@ if (HAVE_EXIT) {
            df = side_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT)),
       list(head = "Expected exits by category at the cohort date (how many of today's institutions in each category will be gone)",
            df = exit_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT)),
-      list(head = "Exit rates used",
-           df = rate_tbl, styles = c(S_NORM, S_NORM, S_DEC, S_DEC, S_INT)),
-      list(head = "Backtest: exits predicted from past dates vs actual by the cohort date (rates as applied, including the merger-environment factor at each origin)",
+      list(head = rate_head, df = rate_tbl, styles = rate_sty),
+      list(head = bt_head,
            df = bt_tbl, styles = c(S_NORM, S_NORM, S_INT, S_DEC, S_INT, S_DEC))),
     cols = col_widths(list(c(1, 1, 26), c(2, 7, 20))))
 }
@@ -1068,7 +1170,13 @@ if (exists("growth_tbl")) {
 }
 if (HAVE_EXIT) {
   G[[length(G) + 1]] <- g_row("2. Key findings", "Allowing for mergers",
-    sprintf("Historically about %.1f%% of credit unions merge or close each year, mostly small ones. Applying those rates, %s of today's %s institutions are expected still to be operating in %s (%s exits), and the under-$10M category falls to %s rather than %s. See the With Mergers tab.",
+    ## The rate quoted is the one the counts imply for TODAY's institutions,
+    ## not a historical average, and the sentence says so.
+    sprintf(paste(if (exit_words()$adjusted)
+                    "About %.1f%% of today's credit unions are expected to merge or close each year, mostly small ones: long-run exit rates by size, adjusted for how fast institutions of each size have been merging over the last two years."
+                  else
+                    "At historical exit rates about %.1f%% of today's credit unions would merge or close each year, mostly small ones.",
+                  "On that basis %s of today's %s institutions are expected still to be operating in %s (%s exits), and the under-$10M category falls to %s rather than %s. See the With Mergers tab."),
             100 * (1 - (1 - pop_counts$h20[N_CAT + 1] / nrow(inst_out))^(1/5)),
             format(nrow(inst_out) - pop_counts$h20[N_CAT + 1], big.mark = ","),
             format(nrow(inst_out), big.mark = ","), H_LAB[3],
@@ -1101,6 +1209,9 @@ tab_help <- list(
   c("Validation", "How the method performed when run from past dates (2021, 2023, 2025) and compared with actual 2026 outcomes: count accuracy by category, up/down movement, institution-level hit rates, and the $10B correction under alternative choices.", "Use it to answer 'how much should I trust this?' The first table shows what the $10B count would be with no correction and with the alternatives; the published figure is the middle choice.", "The backtest figures are UNCORRECTED on purpose, so the bias the correction addresses is visible."),
   c("Diagnostics", "Model-selection results and estimation detail, including the unrounded expected counts behind the whole numbers.", "Analysts only. Nothing here changes how the other tabs are read.", "The unrounded counts are fractions; do not quote them to the field.")
 )
+if (HAVE_EXIT) tab_help <- append(tab_help, list(
+  c("With Mergers", "The same forecast allowing for institutions that merge or close: expected counts by category at each date, how many of today's institutions are expected to be gone, the exit rates applied, and a backtest of those rates from past dates.", "Use this tab, not Total, when the question is how many credit unions there will be; 'Still operating' is the headline. The exits table is by TODAY's category -- 'how many of today's under-$10M credit unions will be gone' -- and each row is that category's count today times its applied rate in the rates table.", "These are expected values: no institution is identified as likely to merge, and the counts cannot be reproduced by filtering a list. The regional blocks are rounded separately and can differ from this tab by one or two.")),
+  after = 2)
 for (t in tab_help) {
   G[[length(G) + 1]] <- g_row("3. Tab by tab", paste(t[1], "- what it shows"), t[2])
   G[[length(G) + 1]] <- g_row("3. Tab by tab", paste(t[1], "- how to read it"), t[3])

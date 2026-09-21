@@ -53,11 +53,12 @@ CFG <- list(
   ASSIGN_BASIS = "median",
 
   ## ---- merger adjustment (script 26) --------------------------------
-  EXIT_BASIS    = "recent", # used only when EXIT_MODEL = "cat"; size_env replaces 26's rates entirely
+  EXIT_BASIS    = "recent", # used only when EXIT_MODEL = "cat"; a model from 30 replaces 26's rates entirely
   EXIT_RECENT_Q = 60L,      # 15 years of origins
   MIN_EXIT_POOL = 200L,     # thin category borrows the rate from the one below
   EXIT_MODEL    = "cat_env2", # verdict of 30 [30.6], 21 Sep 2026: level 1.01, allocation 10.8% (5yr CV) # "cat" | "cat_env" | "size" | "size_env" | "logit" | "cat_logit" | "size_logit" | "peer" | "peer_env" | "logit_cl" | "logit_fin" | "tree" -- decided by 30 [30.6]
-  EXIT_ENV_WINDOW_Q = 8L,   # merger-environment window for cat_env
+  EXIT_ENV_WINDOW_Q = 8L,   # merger-environment window (quarters) for the *_env models
+  EXIT_ENV_SHRINK_N = 2000, # cat_env2: prior weight (institution-quarters) pulling a category's factor toward the aggregate; same value 26 and 30 default to
   FIN_VARS      = NULL,
   PUBLISH_WATCHLIST = FALSE,  # 32: named consolidation-risk list -- leave FALSE unless leadership approves
   CL_K          = 8L,       # peer groups in 31; see the elbow table [31.3]
