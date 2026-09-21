@@ -60,7 +60,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-24b"
+SCRIPT30_VERSION <- "2026-09-24c"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("CAT_LABELS") || !exists("N_Q")) {   # 20's constants live in panel_prep.rds
   .pp <- readRDS("panel_prep.rds")
@@ -100,6 +100,12 @@ if (exists("fc")) for (v in c("region", "cu_type"))
 ## backtest stays honest.
 if (!exists("cl_fit") && file.exists("panel_peers.rds")) {
   .pp <- readRDS("panel_peers.rds"); list2env(.pp, .GlobalEnv); rm(.pp)
+  ## 31's functions were defined at top level, so they look these up in
+  ## the global environment at call time; a fresh session must have them.
+  if (!exists("CL_NSTART")) CL_NSTART <- cfg_get("CL_NSTART", 5L)
+  if (!exists("CL_K"))      CL_K      <- cfg_get("CL_K", 8L)
+  if (!exists("CL_MIN_N"))  CL_MIN_N  <- cfg_get("CL_MIN_N", 300L)
+  if (!exists("CL_VARS"))   CL_VARS   <- cfg_get("CL_VARS", c("y", "g12", "g20", "vol", "hist_len", "acq_cum"))
 }
 HAVE_PEERS <- exists("cl_fit") && exists("atyp_fit")
 cat("Peer groups from 31:", if (HAVE_PEERS) "available" else "not available (run 31 to add)", "\n")
