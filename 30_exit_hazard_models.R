@@ -60,7 +60,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-20a"
+SCRIPT30_VERSION <- "2026-09-23a"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
@@ -589,6 +589,17 @@ ref_name  <- if (nrow(size5)) "size" else "cat"
 if (best != ref_name && (ref_score - v5$score[1]) < 3) {
   cat("Margin over '", ref_name, "' is under 3 points -- not worth the added complexity.\n", sep = "")
   best <- ref_name
+}
+## Asset-based preference: if a size-family model is within 3 points of
+## the winner, take it. Differences that small are inside the fold noise,
+## and the stakeholders asked for an asset-based method. Sept 2026 run:
+## cat_env 18.8 vs size_env 20.8, tied on weighted allocation (12.8).
+size_fam <- v5 %>% filter(model %in% c("size", "size_env", "size_logit")) %>% arrange(score)
+if (nrow(size_fam) && !(best %in% size_fam$model) &&
+    (size_fam$score[1] - v5$score[1]) < 3) {
+  cat(sprintf("'%s' is within %.1f points of '%s' and is asset-based: taking '%s'.\n",
+              size_fam$model[1], size_fam$score[1] - v5$score[1], best, size_fam$model[1]))
+  best <- size_fam$model[1]
 }
 if (best != "cat") {
   cat("A richer model beats the category rate on the scores that matter for counts.\n",
