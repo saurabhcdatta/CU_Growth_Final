@@ -38,7 +38,8 @@
 ##   EXIT_MODEL = "cat" | "cat_env" | "logit" | "logit_fin" | "tree".
 ##
 ## RUN AFTER 22 and 26 (needs feat, make_folds from 22, and the exit
-## columns). A few minutes; the tree model adds a few more if available.
+## columns), and after 31 if peer groups are wanted. A few minutes; the
+## tree model adds a few more if available.
 ## =====================================================================
 
 ## ---- config (production) --------------------------------------------
@@ -59,7 +60,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-17e"
+SCRIPT30_VERSION <- "2026-09-20a"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
@@ -87,6 +88,15 @@ for (v in c("region", "cu_type")) {
 if (exists("fc")) for (v in c("region", "cu_type"))
   if (!is.numeric(fc[[v]])) fc[[v]] <- as.numeric(factor(as.character(fc[[v]]),
     levels = sort(unique(as.character(feat[[paste0(v, "_lab")]])))))
+
+## Peer groups and atypicality from 31, if it has run. The functions are
+## what matter: clusters are refit INSIDE each training fold so the
+## backtest stays honest.
+if (!exists("cl_fit") && file.exists("panel_peers.rds")) {
+  .pp <- readRDS("panel_peers.rds"); list2env(.pp, .GlobalEnv); rm(.pp)
+}
+HAVE_PEERS <- exists("cl_fit") && exists("atyp_fit")
+cat("Peer groups from 31:", if (HAVE_PEERS) "available" else "not available (run 31 to add)", "\n")
 
 ## ---------------------------------------------------------------------
 ## [30.1] Settings
@@ -259,11 +269,16 @@ fit_tree <- function(X, yv, params) {
                                nodesize = params$min.node.size,
                                mtry = max(1L, floor(params$mtry_frac * ncol(X))))
   } else {
-    xgboost::xgboost(data = num_mat(X), label = yv, nrounds = params$nrounds,
-                     eta = params$eta, max_depth = params$max_depth,
-                     min_child_weight = params$min_child_weight,
-                     subsample = 0.8, colsample_bytree = 0.8,
-                     objective = "binary:logistic", verbose = 0)
+    ## xgb.train, not xgboost(): the high-level function in 3.x validates
+    ## the objective against the label's type and refuses numeric 0/1 for
+    ## binary:logistic. xgb.train takes the DMatrix as tuning did.
+    xgboost::xgb.train(
+      params = list(objective = "binary:logistic", eta = params$eta,
+                    max_depth = params$max_depth,
+                    min_child_weight = params$min_child_weight,
+                    subsample = 0.8, colsample_bytree = 0.8),
+      data = xgboost::xgb.DMatrix(num_mat(X), label = yv),
+      nrounds = params$nrounds, verbose = 0)
   }
 }
 pred_tree <- function(m, Xt) {
@@ -372,7 +387,94 @@ m_tree_core <- function(tr, te, h) {
   p
 }
 
-CANDS <- list(cat = m_cat, cat_env = m_cat_env, logit = m_logit)
+## Hybrid: the category rate sets HOW MANY exit in each category (which
+## the rate gets right), the logit decides WHO (which the logit ranks
+## well). Within each category, the rate is spread across institutions in
+## proportion to their logit odds, then rescaled so the category total is
+## unchanged. Calibrated by construction; better allocation if the
+## ranking has any value.
+m_cat_logit <- function(tr, te, h) {
+  base <- cat_rate(tr, te)
+  pl   <- m_logit(tr, te, h)
+  if (all(is.na(pl))) return(base)
+  out <- base
+  for (k in unique(te$cat_k)) {
+    i <- which(te$cat_k == k)
+    w <- pl[i]; w[!is.finite(w)] <- mean(w, na.rm = TRUE)
+    if (length(i) > 1 && sum(w) > 0)
+      out[i] <- pmin(base[i] * w / mean(w), 1)   # mean over the category stays = rate
+  }
+  out
+}
+
+## ---- asset-based hazard ----------------------------------------------
+## The category rate is a step function of size: every institution in a
+## band gets the band's rate. Exit risk actually falls smoothly with size,
+## so a smooth curve in log assets is the natural asset-based baseline. A
+## natural spline with a few knots is flexible enough to bend at the small
+## end and flat enough not to chase noise among the large institutions.
+## No other covariate: this is the size-only model, the asset-based twin
+## of "cat". Calibrated by construction (a logit with an intercept).
+m_size <- function(tr, te, h) {
+  m <- tryCatch(suppressWarnings(glm(ex ~ splines::ns(y, df = 5), data = tr,
+                                     family = binomial())), error = function(e) NULL)
+  if (is.null(m)) return(rep(NA_real_, nrow(te)))
+  predict(m, newdata = te, type = "response")
+}
+m_size_env <- function(tr, te, h) m_size(tr, te, h) * env_factor(min(te$q_index))
+
+## Hybrid on the asset-based level: the size curve sets the level within
+## each category (summed over its members), the full logit ranks within it.
+m_size_logit <- function(tr, te, h) {
+  base <- m_size(tr, te, h)
+  pl   <- m_logit(tr, te, h)
+  if (all(is.na(base))) return(rep(NA_real_, nrow(te)))
+  if (all(is.na(pl))) return(base)
+  out <- base
+  for (k in unique(te$cat_k)) {
+    i <- which(te$cat_k == k)
+    w <- pl[i]; w[!is.finite(w)] <- mean(w, na.rm = TRUE)
+    if (length(i) > 1 && sum(w) > 0) {
+      tot <- sum(base[i])
+      out[i] <- pmin(tot * w / sum(w), 1)      # category total preserved
+    }
+  }
+  out
+}
+
+## ---- peer-group candidates (from 31) --------------------------------
+## "peer": clusters fit on the training fold, empirical exit rate per
+## cluster (thin clusters borrow the overall rate), assigned to test rows
+## by nearest centre. The category rate with better categories.
+## "logit_cl": the full logit plus cluster dummies plus atypicality.
+if (HAVE_PEERS) {
+  peer_rate <- function(tr, te) {
+    cf <- cl_fit(tr)
+    ptr <- cl_assign(tr, cf); pte <- cl_assign(te, cf)
+    r <- tapply(tr$ex, factor(ptr, levels = seq_len(cf$k)), mean)
+    n <- tapply(tr$ex, factor(ptr, levels = seq_len(cf$k)), length)
+    r[is.na(r) | n < CL_MIN_N] <- mean(tr$ex)
+    list(p = as.numeric(r[pte]), fit = cf, ptr = ptr, pte = pte)
+  }
+  m_peer     <- function(tr, te, h) peer_rate(tr, te)$p
+  m_peer_env <- function(tr, te, h) peer_rate(tr, te)$p * env_factor(min(te$q_index))
+  m_logit_cl <- function(tr, te, h) {
+    pr <- peer_rate(tr, te)
+    af <- atyp_fit(tr)
+    tr2 <- tr; te2 <- te
+    tr2$peer <- factor(pr$ptr, levels = seq_len(pr$fit$k)); tr2$atyp <- atyp_score(tr, af)
+    te2$peer <- factor(pr$pte, levels = seq_len(pr$fit$k)); te2$atyp <- atyp_score(te, af)
+    m <- tryCatch(suppressWarnings(glm(as.formula(paste("ex ~", rhs_base, "+ peer + atyp")),
+                                       data = tr2, family = binomial())), error = function(e) NULL)
+    if (is.null(m)) return(rep(NA_real_, nrow(te)))
+    predict(m, newdata = te2, type = "response")
+  }
+}
+
+CANDS <- list(cat = m_cat, cat_env = m_cat_env,
+              size = m_size, size_env = m_size_env,
+              logit = m_logit, cat_logit = m_cat_logit, size_logit = m_size_logit)
+if (HAVE_PEERS) { CANDS$peer <- m_peer; CANDS$peer_env <- m_peer_env; CANDS$logit_cl <- m_logit_cl }
 if (!is.null(FIN_VARS)) CANDS$logit_fin <- m_logit_fin
 if (!is.na(TREE_PKG))   CANDS$tree      <- m_tree
 
@@ -413,6 +515,7 @@ for (h in H_SET) {
         n = nrow(te), brier = mean((p - te$ex)^2), auc = auc(p, te$ex),
         pred = sum(p), act = sum(te$ex),
         cat_mape = mean(abs(by_cat$pred - by_cat$act) / pmax(by_cat$act, 1)),
+        cat_wape = sum(abs(by_cat$pred - by_cat$act)) / max(sum(by_cat$act), 1),
         stringsAsFactors = FALSE)
     }
     cat(sprintf("h=%2d fold@%d done\n", h, f$test[1]))
@@ -439,12 +542,15 @@ summ <- cv_exit %>% group_by(h, model) %>%
             brier = round(mean(brier), 5),
             auc   = round(mean(auc, na.rm = TRUE), 3),
             ratio = round(sum(pred) / sum(act), 2),          # level: 1.00 is perfect
-            cat_mape = round(100 * mean(cat_mape), 1),      # allocation: lower is better
+            cat_mape = round(100 * mean(cat_mape), 1),      # allocation, unweighted by category
+            cat_wape = round(100 * mean(cat_wape), 1),      # allocation, weighted by exits -- the one to read
             .groups = "drop") %>%
   arrange(h, model)
 cat("\n=== Exit-hazard candidates, blocked-origin CV ===\n",
     "ratio    = predicted / actual exits (level)\n",
-    "cat_mape = mean abs % error of exits by category (allocation)\n",
+    "cat_mape = mean abs % error of exits by category, each category equal\n",
+    "           (dominated by the top categories, which have a handful of exits)\n",
+    "cat_wape = abs errors by category summed / total exits -- weighted; READ THIS ONE\n",
     "auc      = ranking quality (0.5 = none)\n\n")
 for (hh in H_SET) {
   cat("h =", hh, "\n")
@@ -457,14 +563,33 @@ for (hh in H_SET) {
 ## Pick on the count-relevant score: closest level ratio to 1 at five
 ## years, with allocation error as the tie-break. Discrimination (AUC) is
 ## reported but does not decide -- see the header.
+## Score = weighted allocation error plus the level error, both in
+## percent, so a model has to be better on the counts overall, not just on
+## one of the two.
 v5 <- summ %>% filter(h == 20) %>%
-  mutate(level_err = abs(ratio - 1)) %>% arrange(level_err, cat_mape)
+  mutate(level_err = 100 * abs(ratio - 1), score = cat_wape + level_err) %>%
+  arrange(score)
 best <- v5$model[1]
-cat(sprintf("\nVerdict at five years: '%s' (level ratio %.2f, allocation error %.1f%%).\n",
-            best, v5$ratio[1], v5$cat_mape[1]))
+cat("\nFive-year scoreboard (lower is better):\n")
+print(v5 %>% select(model, ratio, level_err, cat_wape, cat_mape, auc, score) %>%
+        as.data.frame(), row.names = FALSE)
+cat(sprintf("\nVerdict at five years: '%s' (level ratio %.2f, weighted allocation error %.1f%%).\n",
+            best, v5$ratio[1], v5$cat_wape[1]))
 base5 <- v5 %>% filter(model == "cat")
-cat(sprintf("Baseline 'cat': level ratio %.2f, allocation error %.1f%%.\n",
-            base5$ratio, base5$cat_mape))
+cat(sprintf("Baseline 'cat': level ratio %.2f, weighted allocation error %.1f%%.\n",
+            base5$ratio, base5$cat_wape))
+## The stakeholders want an asset-based method, so the reference model is
+## "size" (smooth in assets), not "cat" (step by band). A richer model
+## has to beat THAT by a margin worth its complexity.
+size5 <- v5 %>% filter(model == "size")
+if (nrow(size5)) cat(sprintf("Asset-based reference 'size': level ratio %.2f, weighted allocation error %.1f%%.\n",
+                             size5$ratio, size5$cat_wape))
+ref_score <- if (nrow(size5)) size5$score else base5$score
+ref_name  <- if (nrow(size5)) "size" else "cat"
+if (best != ref_name && (ref_score - v5$score[1]) < 3) {
+  cat("Margin over '", ref_name, "' is under 3 points -- not worth the added complexity.\n", sep = "")
+  best <- ref_name
+}
 if (best != "cat") {
   cat("A richer model beats the category rate on the scores that matter for counts.\n",
       "Set EXIT_MODEL <- \"", best, "\" in the config and re-run 26 -> 27.\n", sep = "")
