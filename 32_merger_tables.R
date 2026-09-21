@@ -32,7 +32,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr); library(splines)
-SCRIPT32_VERSION <- "2026-09-24d"
+SCRIPT32_VERSION <- "2026-09-24e"
 cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -157,6 +157,33 @@ longrun_3  <- round(100 * mean(feat$exit_h12[feat$usable_h12]), 2)
 longrun_5  <- round(100 * mean(feat$exit_h20[feat$usable_h20]), 2)
 cat(sprintf("\nT2 -- exit rate by origin year (long-run 1/3/5 yr: %.2f / %.2f / %.2f %%):\n",
             longrun, longrun_3, longrun_5))
+print(as.data.frame(T2), row.names = FALSE)
+
+## ---- T2b: is the stable aggregate hiding movement within categories? ----
+## The environment factor compares the AGGREGATE one-year rate, recent vs
+## long-run. The population has shifted toward larger institutions (which
+## merge less) while mid-sized rates rose; those can cancel in the total.
+## Here the same comparison is made within each category. Factors near 1
+## everywhere mean the aggregate factor is adequate; a spread means the
+## correction belongs at the category level.
+us1   <- feat$usable_h4 & feat$q_index <= N_Q - 4L
+rec1  <- us1 & feat$q_index > N_Q - 4L - ENV_WINDOW_Q
+T2b <- data.frame(Category = CAT_PRETTY[CAT_LABELS], stringsAsFactors = FALSE, check.names = FALSE)
+lr_c  <- tapply(feat$exit_h4[us1],  factor(feat$cat_k[us1],  levels = seq_len(N_CAT)), mean)
+re_c  <- tapply(feat$exit_h4[rec1], factor(feat$cat_k[rec1], levels = seq_len(N_CAT)), mean)
+n_re  <- tapply(feat$exit_h4[rec1], factor(feat$cat_k[rec1], levels = seq_len(N_CAT)), length)
+T2b[["Long-run 1-yr rate (%)"]]    <- round(100 * as.numeric(lr_c), 2)
+T2b[["Last 2 years 1-yr rate (%)"]] <- round(100 * as.numeric(re_c), 2)
+T2b[["Institution-quarters, last 2 years"]] <- as.integer(n_re)
+T2b[["Factor (recent / long-run)"]] <- round(as.numeric(re_c) / as.numeric(lr_c), 2)
+T2b <- rbind(T2b, data.frame(Category = "All institutions",
+                             `Long-run 1-yr rate (%)` = longrun,
+                             `Last 2 years 1-yr rate (%)` = round(100 * mean(feat$exit_h4[rec1]), 2),
+                             `Institution-quarters, last 2 years` = sum(rec1),
+                             `Factor (recent / long-run)` = round(env_factor_now, 2),
+                             check.names = FALSE))
+cat("\nT2b -- merger pace by category, last two years vs long-run:\n")
+print(T2b, row.names = FALSE)
 print(as.data.frame(T2), row.names = FALSE)
 
 ## ---------------------------------------------------------------------
@@ -369,9 +396,12 @@ SHm <- list(
                   longrun, longrun_3, longrun_5, cohort_lab, env_factor_now),
           notes = c("Share of institutions active at the start of each year that had merged or closed one, three and five years later.",
                     sprintf("Three-year rates stop at %d and five-year rates at %d because later windows have not closed yet.", END_Y - 3L, END_Y - 5L),
-                    "The environment factor compares the most recent two years' one-year rate with the long-run one-year average and scales the rate curve on the first tab."),
-          blocks = list(list(head = "By origin year", df = chr(T2), styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC))),
-          cols = col_widths(list(c(1, 1, 10), c(2, 5, 18)))),
+                    "The environment factor compares the most recent two years' one-year rate with the long-run one-year average and scales the rate curve on the first tab.",
+                    "The second table makes the same comparison within each category. The total can stay flat while categories move in opposite directions: the system has shifted toward larger institutions, which merge less, while mid-sized institutions have merged more often than their long-run rate. A factor above 1 means that category is merging faster than its own history; below 1, slower."),
+          blocks = list(list(head = "By origin year", df = chr(T2), styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC)),
+                        list(head = "Merger pace by category: the last two years against the long-run (one-year rates)",
+                             df = chr(T2b), styles = c(S_NORM, S_DEC, S_DEC, S_INT, S_DEC))),
+          cols = col_widths(list(c(1, 1, 18), c(2, 5, 20)))),
 
   sheet32("Expected exits", "Expected mergers and closures from today's institutions",
           sprintf("Cohort %s. Total expected by %s: %.0f of %s (%.1f%%).", cohort_lab, H_LAB["20"],
@@ -410,7 +440,7 @@ OUTm <- sprintf("CU_Merger_Tables_%s.xlsx", cohort_lab)
 xlsx_write(SHm, OUTm)
 cat("\nWritten:", normalizePath(OUTm), "\n")
 
-saveRDS(list(T1 = T1, T1b = T1b, T2 = T2, T3_cat = T3_cat, T3_cell = T3_cell, T3_state = T3_state,
+saveRDS(list(T1 = T1, T1b = T1b, T2 = T2, T2b = T2b, T3_cat = T3_cat, T3_cell = T3_cell, T3_state = T3_state,
              T4 = T4, T4_row = if (exists("T4_row")) T4_row else NULL,
              T4_col = if (exists("T4_col")) T4_col else NULL, T5_hit = T5_hit, T5_now = T5_now, env_factor_now = env_factor_now,
              EXIT_MODEL = EXIT_MODEL, SCRIPT32_VERSION = SCRIPT32_VERSION),
