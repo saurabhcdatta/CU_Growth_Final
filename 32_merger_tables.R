@@ -32,7 +32,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr); library(splines)
-SCRIPT32_VERSION <- "2026-09-23a"
+SCRIPT32_VERSION <- "2026-09-23b"
 cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -49,6 +49,13 @@ if (!exists("flow_tbl") && file.exists("panel_peers.rds")) {
 }
 if (!exists("panel")) { .pp <- readRDS("panel_prep.rds"); panel <- .pp$panel; rm(.pp) }
 stopifnot(exists("feat"), exists("fc"), exists("inst_out"), exists("P_EXIT_ALT"))
+
+## 20's session constants, derived if 20 has not run in this session
+if (!exists("START_YEAR")) START_YEAR <- cfg_get("START_YEAR", 2005L)
+if (!exists("END_Y"))      END_Y      <- cfg_get("END_Y", START_YEAR + (N_Q - 1L) %/% 4L)
+if (!exists("REG_LAB"))    REG_LAB    <- cfg_get("REG_LAB", c("1" = "Region 1", "2" = "Region 2", "3" = "Region 3", "8" = "ONES"))
+if (!exists("CT_LAB"))     CT_LAB     <- cfg_get("CT_LAB", c("1" = "FCU", "2" = "FISCU"))
+if (!exists("CAT_PRETTY")) { .pp <- readRDS("panel_prep.rds"); CAT_PRETTY <- .pp$CAT_PRETTY; rm(.pp) }
 
 EXIT_MODEL <- cfg_get("EXIT_MODEL", "size_env")
 stopifnot(!is.null(P_EXIT_ALT[[EXIT_MODEL]]))
