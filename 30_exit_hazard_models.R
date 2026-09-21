@@ -60,8 +60,14 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-24a"
+SCRIPT30_VERSION <- "2026-09-24b"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
+if (!exists("CAT_LABELS") || !exists("N_Q")) {   # 20's constants live in panel_prep.rds
+  .pp <- readRDS("panel_prep.rds")
+  for (.k in c("CAT_LABELS", "CAT_PRETTY", "N_CAT", "N_Q", "START_YEAR", "BREAKS", "LOG_EDGE",
+               "qgrid", "REGIONS", "ASSET_SCALE")) if (!exists(.k) && !is.null(.pp[[.k]])) assign(.k, .pp[[.k]])
+  rm(.pp, .k)
+}
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
 if (!exists("fc"))   { prb <- readRDS("panel_probs.rds"); list2env(prb, .GlobalEnv) }
