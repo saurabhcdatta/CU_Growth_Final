@@ -163,6 +163,30 @@ print(as.data.frame(exit_wide), row.names = FALSE)
 ## For each horizon, take the cohort at origin N_Q - h (so the window ends
 ## at the cohort date), estimate rates from origins whose window closed
 ## BEFORE that origin, predict exits by category, compare to what happened.
+## The backtest must test the rates AS APPLIED. When EXIT_MODEL is one of
+## the environment-adjusted models from 30, the published counts use the
+## long-run category rate times a merger-environment factor measured at
+## the cohort date; so the backtest applies the same factor measured at
+## each past origin (from one-year exits closed before that origin), the
+## way 30's cross-validation does. Without this the block shows the
+## un-adjusted rates' 20-25% under-prediction under counts that no longer
+## use them. Same maths as env_factor() / env_factor_cat() in 30.
+ENV_WINDOW_Q <- cfg_get("EXIT_ENV_WINDOW_Q", 8L)
+ENV_SHRINK_N <- cfg_get("EXIT_ENV_SHRINK_N", 2000)
+env_at <- function(origin) {           # aggregate factor and shrunk category factors at an origin
+  us  <- feat$usable_h4 & feat$q_index <= origin - 4L
+  e1  <- feat$exit_h4[us]; q1 <- feat$q_index[us]; k1 <- feat$cat_k[us]
+  rec <- q1 > origin - 4L - ENV_WINDOW_Q
+  if (sum(rec) < 500 || length(e1) < 5000) return(list(all = 1, cat = rep(1, N_CAT)))
+  f_all <- mean(e1[rec]) / mean(e1); out <- rep(f_all, N_CAT)
+  for (k in seq_len(N_CAT)) {
+    lr <- mean(e1[k1 == k]); n_r <- sum(rec & k1 == k)
+    if (n_r > 0 && is.finite(lr) && lr > 0)
+      out[k] <- (n_r * mean(e1[rec & k1 == k]) / lr + ENV_SHRINK_N * f_all) / (n_r + ENV_SHRINK_N)
+  }
+  list(all = min(max(f_all, 0.5), 2), cat = pmin(pmax(out, 0.5), 3))
+}
+BT_ENV <- if (exists("EXIT_MODEL")) EXIT_MODEL else "cat"
 exit_bt <- bind_rows(lapply(H_SET, function(h) {
   o <- N_Q - h
   cohort <- feat %>% filter(q_index == o, .data[[paste0("usable_h", h)]]) %>%
@@ -176,6 +200,11 @@ exit_bt <- bind_rows(lapply(H_SET, function(h) {
     if (nrow(src)) rates_o <- bind_rows(rates_o %>% filter(cat_k != k),
                                         data.frame(cat_k = k, rate = src$rate[1], n = 0L))
   }
+  if (BT_ENV %in% c("cat_env", "cat_env2", "size_env", "size_env2")) {
+    f <- env_at(o)
+    fk <- if (BT_ENV %in% c("cat_env2", "size_env2")) f$cat else rep(f$all, N_CAT)
+    rates_o <- rates_o %>% mutate(rate = pmin(rate * fk[cat_k], 1))
+  }
   cohort %>% left_join(rates_o, by = "cat_k") %>%
     group_by(cat_k) %>%
     summarise(n = n(), predicted = sum(rate), actual = sum(ex), .groups = "drop") %>%
@@ -188,7 +217,11 @@ print(exit_bt %>% select(h, origin, cat, n, predicted = predicted, actual, ratio
 exit_bt_tot <- exit_bt %>% group_by(h, origin) %>%
   summarise(n = sum(n), predicted = round(sum(predicted), 1), actual = sum(actual),
             ratio = round(sum(actual) / sum(predicted), 2), .groups = "drop")
-cat("\nBacktest totals:\n"); print(as.data.frame(exit_bt_tot), row.names = FALSE)
+cat("\nBacktest totals (rates as applied under EXIT_MODEL =", BT_ENV, "):\n")
+print(as.data.frame(exit_bt_tot), row.names = FALSE)
+if (BT_ENV %in% c("cat_env2", "size_env2")) for (h in H_SET)
+  cat(sprintf("  environment factors at %s: %s\n", qgrid$q_label[N_Q - h],
+              paste(sprintf("%.2f", env_at(N_Q - h)$cat), collapse = " / ")))
 cat("\nA ratio near 1 at every horizon means the category-level rate is\n",
     "unbiased in aggregate. Ratios well below 1 in every category would say\n",
     "exits are slowing; set EXIT_BASIS <- \"recent\" and compare.\n")
@@ -295,7 +328,7 @@ stopifnot(all((pop_cells %>% group_by(region, cu_type) %>%
 cell_vs_nat <- pop_cells %>% group_by(state) %>%
   summarise(across(c(h4, h12, h20), sum), .groups = "drop") %>%
   arrange(match(state, STATE_LAB))
-cat("\nSum of cells minus national rounding (should be 0 or +/-1):\n")
+cat("\nSum of cells minus national rounding (should be 0 or within +/-2 (rounding across many state cells)):\n")
 print(data.frame(state = STATE_LAB,
                  d4 = cell_vs_nat$h4 - pop_counts$h4,
                  d12 = cell_vs_nat$h12 - pop_counts$h12,
