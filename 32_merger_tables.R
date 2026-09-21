@@ -32,7 +32,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr); library(splines)
-SCRIPT32_VERSION <- "2026-09-24a"
+SCRIPT32_VERSION <- "2026-09-24d"
 cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -100,17 +100,63 @@ T1[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1[["Current 5yr (%)"]] /
 cat("\nT1 -- merger rate by asset size (share exiting within the horizon):\n")
 print(T1, row.names = FALSE)
 
+## ---- T1b: the same curve summarised by the seven asset categories ----
+## The category rate is the average of the size curve over the institutions
+## in that category today, so it is consistent with the grid above: a
+## category is a mix of sizes, and its rate is the mean of its members'.
+fc_now <- feat %>% filter(q_index == N_Q) %>%
+  semi_join(fc %>% select(join_number), by = "join_number") %>%
+  select(join_number, y, cat_k)
+T1b <- data.frame(Category = CAT_PRETTY[CAT_LABELS], Institutions = 0L,
+                  check.names = FALSE, stringsAsFactors = FALSE)
+T1b$Institutions <- as.integer(table(factor(fc_now$cat_k, levels = seq_len(N_CAT))))
+for (h in H_SET) {
+  us <- feat[[paste0("usable_h", h)]]
+  d  <- feat[us, ]; d$ex <- d[[paste0("exit_h", h)]]
+  m  <- glm(ex ~ ns(y, df = 5), data = d, family = binomial())
+  p  <- predict(m, newdata = fc_now, type = "response")
+  lr <- tapply(p, factor(fc_now$cat_k, levels = seq_len(N_CAT)), mean)
+  T1b[[paste0("Long-run ", H_LAB[as.character(h)], " (%)")]] <- round(100 * as.numeric(lr), 1)
+  T1b[[paste0("Current ", H_LAB[as.character(h)], " (%)")]]  <- round(100 * pmin(as.numeric(lr) * env_factor_now, 1), 1)
+}
+T1b[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1b[["Current 5yr (%)"]] / 100)^(1/5)), 2)
+## Realised history alongside, for the reader who wants the raw record:
+## the share of institutions in each category since 2005 that exited
+## within five years (26's category rate, full basis).
+hist5 <- feat %>% filter(usable_h20) %>% group_by(cat_k) %>%
+  summarise(r = 100 * mean(exit_h20), .groups = "drop")
+T1b[["Realised 5yr since 2005 (%)"]] <- round(hist5$r[match(seq_len(N_CAT), hist5$cat_k)], 1)
+cat("\nT1b -- merger rate by asset category:\n")
+print(T1b, row.names = FALSE)
+
 ## ---------------------------------------------------------------------
 ## [32.2] T2 -- the historical record and the environment factor
 ## ---------------------------------------------------------------------
+## One-, three- and five-year rates by origin year. Longer horizons are
+## only available for origins whose window has closed: three-year to
+## END_Y - 3, five-year to END_Y - 5. Institutions counted are those with
+## a usable one-year window (the widest set).
+rate_by_year <- function(h) {
+  feat %>% filter(.data[[paste0("usable_h", h)]]) %>%
+    mutate(year = START_YEAR + (q_index - 1) %/% 4) %>%
+    group_by(year) %>%
+    summarise(r = round(100 * mean(.data[[paste0("exit_h", h)]]), 2), .groups = "drop")
+}
 T2 <- feat %>% filter(usable_h4) %>%
   mutate(year = START_YEAR + (q_index - 1) %/% 4) %>%
   group_by(year) %>%
-  summarise(institutions = n_distinct(join_number),
-            `1-yr merger rate (%)` = round(100 * mean(exit_h4), 2), .groups = "drop") %>%
-  filter(year < END_Y)
-longrun <- round(100 * mean(feat$exit_h4[feat$usable_h4]), 2)
-cat("\nT2 -- one-year exit rate by origin year (long-run", longrun, "%):\n")
+  summarise(institutions = n_distinct(join_number), .groups = "drop") %>%
+  filter(year < END_Y) %>%
+  left_join(rate_by_year(4)  %>% rename(`1-yr rate (%)` = r), by = "year") %>%
+  left_join(rate_by_year(12) %>% rename(`3-yr rate (%)` = r), by = "year") %>%
+  left_join(rate_by_year(20) %>% rename(`5-yr rate (%)` = r), by = "year") %>%
+  mutate(year = as.character(year)) %>%   # text, so Excel does not show 2,007
+  rename(Year = year, Institutions = institutions)
+longrun    <- round(100 * mean(feat$exit_h4[feat$usable_h4]), 2)
+longrun_3  <- round(100 * mean(feat$exit_h12[feat$usable_h12]), 2)
+longrun_5  <- round(100 * mean(feat$exit_h20[feat$usable_h20]), 2)
+cat(sprintf("\nT2 -- exit rate by origin year (long-run 1/3/5 yr: %.2f / %.2f / %.2f %%):\n",
+            longrun, longrun_3, longrun_5))
 print(as.data.frame(T2), row.names = FALSE)
 
 ## ---------------------------------------------------------------------
@@ -158,6 +204,23 @@ if (exists("flow") || exists("flow_tbl")) {
                                    CAT_PRETTY[CAT_LABELS[fl$acquirer_cat]]))
   T4 <- T4[CAT_PRETTY[CAT_LABELS][CAT_PRETTY[CAT_LABELS] %in% rownames(T4)],
            CAT_PRETTY[CAT_LABELS][CAT_PRETTY[CAT_LABELS] %in% colnames(T4)], drop = FALSE]
+  ## Percentages: rows to 100 (who absorbs targets of this size) and
+  ## columns to 100 (what acquirers of this size take on). Largest-
+  ## remainder rounding so each row / column adds to exactly 100.
+  lr100 <- function(x) {
+    if (sum(x) == 0) return(rep(0L, length(x)))
+    p <- 100 * x / sum(x); fl <- floor(p); k <- 100L - sum(fl)
+    if (k > 0) { o <- order(p - fl, decreasing = TRUE)[seq_len(k)]; fl[o] <- fl[o] + 1 }
+    as.integer(fl)
+  }
+  M4 <- as.matrix(T4)
+  T4_row <- as.data.frame(t(apply(M4, 1, lr100))); names(T4_row) <- colnames(M4)
+  T4_col <- as.data.frame(apply(M4, 2, lr100));    names(T4_col) <- colnames(M4)
+  T4_row <- cbind(`Target category` = rownames(M4), T4_row, `Row total` = rowSums(T4_row))
+  T4_col <- cbind(`Target category` = rownames(M4), T4_col)
+  T4_col <- rbind(T4_col, data.frame(`Target category` = "Column total",
+                                     as.list(colSums(T4_col[, -1])), check.names = FALSE))
+  rownames(T4_row) <- NULL; rownames(T4_col) <- NULL
   T4 <- cbind(`Target category` = rownames(T4), T4, Total = rowSums(T4))
   rownames(T4) <- NULL
   cat("\nT4 -- mergers since", START_YEAR, ": target category (rows) by acquirer category (cols):\n")
@@ -293,17 +356,22 @@ SHm <- list(
           notes = c("'Long-run' is the historical average for institutions of that size, from every credit union since 2005.",
                     sprintf("'Current' scales the long-run rate by the merger-environment factor, %.2f: the last two years' one-year rate divided by the long-run average (see History). A factor of 1.00 means the merger pace is at its long-run normal.", env_factor_now),
                     "'Current, per year' is the current five-year rate expressed as a constant annual rate.",
-                    "Rates are read from a smooth curve fitted to size, so a credit union between two rows sits between their values."),
-          blocks = list(list(head = "Share exiting within the horizon (%)", df = chr(T1),
+                    "The category table is the average of the size curve over the institutions in each category today; the size table is the curve itself, so a credit union between two rows sits between their values.",
+                    "'Realised 5yr since 2005' is the raw record: the share of institutions in that category, at any point since 2005, that had exited five years later."),
+          blocks = list(list(head = "By asset category: share exiting within the horizon (%)",
+                             df = chr(T1b), styles = c(S_NORM, S_INT, rep(S_DEC, ncol(T1b) - 2))),
+                        list(head = "By asset size: share exiting within the horizon (%)", df = chr(T1),
                              styles = c(S_NORM, rep(S_DEC, ncol(T1) - 1)))),
-          cols = col_widths(list(c(1, 1, 12), c(2, ncol(T1), 17))), freeze = list(x = 1, y = 0)),
+          cols = col_widths(list(c(1, 1, 16), c(2, 2, 12), c(3, ncol(T1b), 17))), freeze = list(x = 1, y = 0)),
 
-  sheet32("History", "One-year merger rate by year",
-          sprintf("Long-run average %.2f%%. Environment factor at %s: %.2f.", longrun, cohort_lab, env_factor_now),
-          notes = c("Share of institutions active at the start of each year that had merged or closed one year later.",
-                    "The environment factor compares the most recent two years with the long-run average and scales the rate curve on the first tab."),
-          blocks = list(list(head = "By origin year", df = chr(T2), styles = c(S_INT, S_INT, S_DEC))),
-          cols = col_widths(list(c(1, 3, 22)))),
+  sheet32("History", "Merger rate by year",
+          sprintf("Long-run averages: 1 year %.2f%%, 3 years %.2f%%, 5 years %.2f%%. Environment factor at %s: %.2f.",
+                  longrun, longrun_3, longrun_5, cohort_lab, env_factor_now),
+          notes = c("Share of institutions active at the start of each year that had merged or closed one, three and five years later.",
+                    sprintf("Three-year rates stop at %d and five-year rates at %d because later windows have not closed yet.", END_Y - 3L, END_Y - 5L),
+                    "The environment factor compares the most recent two years' one-year rate with the long-run one-year average and scales the rate curve on the first tab."),
+          blocks = list(list(head = "By origin year", df = chr(T2), styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC))),
+          cols = col_widths(list(c(1, 1, 10), c(2, 5, 18)))),
 
   sheet32("Expected exits", "Expected mergers and closures from today's institutions",
           sprintf("Cohort %s. Total expected by %s: %.0f of %s (%.1f%%).", cohort_lab, H_LAB["20"],
@@ -331,14 +399,19 @@ if (!is.null(T4))
           sprintf("All mergers since %d matched to both sides (%s events).", START_YEAR, format(sum(T4$Total), big.mark = ",")),
           notes = c("Rows: the asset category of the credit union that was absorbed, at its last report. Columns: the asset category of the acquirer one year before the merger (measured at the merger, the acquisition itself moves the acquirer up a category).",
                     "Read across a row to see who absorbs institutions of that size; read down a column to see what an acquirer of that size takes on."),
-          blocks = list(list(head = "Number of mergers", df = chr(T4), styles = c(S_NORM, rep(S_INT, ncol(T4) - 1)))),
+          blocks = list(list(head = "Number of mergers", df = chr(T4), styles = c(S_NORM, rep(S_INT, ncol(T4) - 1))),
+                        list(head = "Row shares (%): of targets of this size, the share absorbed by acquirers of each size -- each row adds to 100",
+                             df = chr(T4_row), styles = c(S_NORM, rep(S_INT, ncol(T4_row) - 1))),
+                        list(head = "Column shares (%): of acquisitions by acquirers of this size, the share that were targets of each size -- each column adds to 100",
+                             df = chr(T4_col), styles = c(S_NORM, rep(S_INT, ncol(T4_col) - 1)))),
           cols = col_widths(list(c(1, 1, 20), c(2, ncol(T4), 15))))
 
 OUTm <- sprintf("CU_Merger_Tables_%s.xlsx", cohort_lab)
 xlsx_write(SHm, OUTm)
 cat("\nWritten:", normalizePath(OUTm), "\n")
 
-saveRDS(list(T1 = T1, T2 = T2, T3_cat = T3_cat, T3_cell = T3_cell, T3_state = T3_state,
-             T4 = T4, T5_hit = T5_hit, T5_now = T5_now, env_factor_now = env_factor_now,
+saveRDS(list(T1 = T1, T1b = T1b, T2 = T2, T3_cat = T3_cat, T3_cell = T3_cell, T3_state = T3_state,
+             T4 = T4, T4_row = if (exists("T4_row")) T4_row else NULL,
+             T4_col = if (exists("T4_col")) T4_col else NULL, T5_hit = T5_hit, T5_now = T5_now, env_factor_now = env_factor_now,
              EXIT_MODEL = EXIT_MODEL, SCRIPT32_VERSION = SCRIPT32_VERSION),
         file = "panel_merger_tables.rds")
