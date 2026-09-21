@@ -42,7 +42,7 @@ library(dplyr); library(tidyr)
 
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 stopifnot(exists("feat"), exists("CAT_LABELS"), exists("N_CAT"), exists("N_Q"))
-SCRIPT31_VERSION <- "2026-09-22a"
+SCRIPT31_VERSION <- "2026-09-22b"
 cat("31_peer_groups.R version", SCRIPT31_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -231,16 +231,24 @@ acq_events <- panel %>%
   filter(!is.na(join_number_acquired), join_number_acquired > 0) %>%
   transmute(acquirer = join_number, target = join_number_acquired, q_acq = q_index)
 peer_at <- feat %>% select(join_number, q_index, peer)
-## target's group at its last observed quarter; acquirer's at the event
+## Target's group at its last observed quarter. Acquirer's group FOUR
+## QUARTERS BEFORE the event: measured at the event, the acquisition
+## itself has just spiked the acquirer's growth and volatility, and a
+## large institution gets classified into the volatile roll-up group by
+## the very merger being counted (the first run showed $196M targets
+## "absorbed" by a $34M group -- that artifact).
+ACQ_LAG <- 4L
 tgt_last <- feat %>% group_by(join_number) %>% filter(q_index == max(q_index)) %>%
   ungroup() %>% select(target = join_number, target_peer = peer)
 flow <- acq_events %>%
   inner_join(tgt_last, by = "target") %>%
-  left_join(peer_at %>% rename(acquirer = join_number, q_acq = q_index, acquirer_peer = peer),
-            by = c("acquirer", "q_acq")) %>%
+  mutate(q_pre = q_acq - ACQ_LAG) %>%
+  left_join(peer_at %>% rename(acquirer = join_number, q_pre = q_index, acquirer_peer = peer),
+            by = c("acquirer", "q_pre")) %>%
   filter(!is.na(acquirer_peer))
 flow_tbl <- table(target = flow$target_peer, acquirer = flow$acquirer_peer)
-cat("\nWho absorbs whom: mergers since", START_YEAR, "(rows = target's group, cols = acquirer's group):\n")
+cat("\nWho absorbs whom: mergers since", START_YEAR,
+    "(rows = target's group at exit, cols = acquirer's group", ACQ_LAG, "quarters before):\n")
 print(flow_tbl)
 cat("\nShare of all acquisitions made by each group (%):\n")
 print(round(100 * prop.table(table(flow$acquirer_peer))))
