@@ -42,7 +42,7 @@ library(dplyr); library(tidyr)
 
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 stopifnot(exists("feat"), exists("CAT_LABELS"), exists("N_CAT"), exists("N_Q"))
-SCRIPT31_VERSION <- "2026-09-21b"
+SCRIPT31_VERSION <- "2026-09-22a"
 cat("31_peer_groups.R version", SCRIPT31_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -193,6 +193,62 @@ desc <- feat_desc %>%
 cat("\nPeer groups on the full history (interpretation only -- 30 refits per fold):\n")
 print(as.data.frame(desc), row.names = FALSE)
 
+## ---------------------------------------------------------------------
+## [31.4b] Acquired others vs acquired BY others
+##
+## "acquisitions" above is a feature: the share of a group that has
+## absorbed another CU. Being acquired is an outcome -- it is the exit --
+## so it lives in the exit rate. Two things split it out:
+##   (1) the five-year exit rate by type: merged into another CU vs
+##       closed/liquidated (20's exit_type);
+##   (2) who absorbs whom: for each merger, the target's peer group at its
+##       last observation against the acquirer's peer group at the same
+##       quarter, from join_number_acquired on the acquirer's rows.
+## ---------------------------------------------------------------------
+if (!exists("panel")) { .pp <- readRDS("panel_prep.rds"); panel <- .pp$panel; rm(.pp) }
+
+## exit type onto feat (per institution; constant over its rows)
+ex_type <- panel %>% distinct(join_number, exit_type, exit_q)
+feat_desc <- feat_desc %>% select(-any_of(c("exit_type", "exit_q"))) %>%
+  left_join(ex_type, by = "join_number") %>%
+  mutate(merged_h20 = usable_h20 & exit_h20 == 1 & exit_type == "merged",
+         closed_h20 = usable_h20 & exit_h20 == 1 & exit_type == "closed_other")
+
+desc_exit <- feat_desc %>%
+  group_by(peer) %>%
+  summarise(exit_5y_pct = round(100 * mean(exit_h20[usable_h20]), 1),
+            acquired_by_others_5y_pct = round(100 * sum(merged_h20) / sum(usable_h20), 1),
+            closed_5y_pct = round(100 * sum(closed_h20) / sum(usable_h20), 1),
+            .groups = "drop")
+desc <- desc %>% left_join(desc_exit %>% select(-exit_5y_pct), by = "peer")
+cat("\nFive-year exits by type (acquired by another CU vs closed):\n")
+print(desc %>% select(peer, median_assets_M, growth_5y_pct, acquisitions,
+                      exit_5y_pct, acquired_by_others_5y_pct, closed_5y_pct) %>%
+        as.data.frame(), row.names = FALSE)
+
+## who absorbs whom
+acq_events <- panel %>%
+  filter(!is.na(join_number_acquired), join_number_acquired > 0) %>%
+  transmute(acquirer = join_number, target = join_number_acquired, q_acq = q_index)
+peer_at <- feat %>% select(join_number, q_index, peer)
+## target's group at its last observed quarter; acquirer's at the event
+tgt_last <- feat %>% group_by(join_number) %>% filter(q_index == max(q_index)) %>%
+  ungroup() %>% select(target = join_number, target_peer = peer)
+flow <- acq_events %>%
+  inner_join(tgt_last, by = "target") %>%
+  left_join(peer_at %>% rename(acquirer = join_number, q_acq = q_index, acquirer_peer = peer),
+            by = c("acquirer", "q_acq")) %>%
+  filter(!is.na(acquirer_peer))
+flow_tbl <- table(target = flow$target_peer, acquirer = flow$acquirer_peer)
+cat("\nWho absorbs whom: mergers since", START_YEAR, "(rows = target's group, cols = acquirer's group):\n")
+print(flow_tbl)
+cat("\nShare of all acquisitions made by each group (%):\n")
+print(round(100 * prop.table(table(flow$acquirer_peer))))
+cat("\nShare of all targets coming from each group (%):\n")
+print(round(100 * prop.table(table(flow$target_peer))))
+cat(sprintf("\n%d merger events matched to both sides (of %d with an acquirer named).\n",
+            nrow(flow), nrow(acq_events)))
+
 ## Cross-tab against the categories: do the clusters cut across bands?
 xt <- table(feat$peer, CAT_LABELS[feat$cat_k])
 cat("\nPeer group x asset category (share of each cluster, %):\n")
@@ -242,6 +298,7 @@ cat("A rising pattern here is the signal 30 will test.\n")
 saveRDS(list(CL_VARS = CL_VARS, CL_K = CL_K, CL_MIN_N = CL_MIN_N,
              CL_FULL = CL_FULL, AT_FULL = AT_FULL, desc = desc, elbow_tbl = elbow_tbl,
              atyp_tbl = atyp_tbl, peer_labels = peer_labels,
+             flow_tbl = if (exists("flow_tbl")) flow_tbl else NULL,
              cl_prep = cl_prep, cl_fit = cl_fit, cl_assign = cl_assign,
              atyp_fit = atyp_fit, atyp_score = atyp_score,
              SCRIPT31_VERSION = SCRIPT31_VERSION),
