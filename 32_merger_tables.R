@@ -32,7 +32,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr); library(splines)
-SCRIPT32_VERSION <- "2026-09-23b"
+SCRIPT32_VERSION <- "2026-09-24a"
 cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -229,56 +229,115 @@ if (PUBLISH_WATCHLIST) {
 }
 
 ## ---------------------------------------------------------------------
-## [32.7] Write
+## [32.7] Write -- a standalone, formatted workbook
+##
+## Sources the project's own base-R Excel writer (the only one that works
+## on the locked-down machine) rather than borrowing 27's session, so this
+## script writes the workbook whether or not 27 has run.
 ## ---------------------------------------------------------------------
-notes_T1 <- c("The probability that a credit union of a given size merges or closes within one, three or five years, from every credit union since 2005. 'Long-run' is the historical average; 'Current' scales it by how the last two years compare with that average (the merger-environment factor shown on the next tab). The published population counts use the 'Current' rates.",
-              "Closures are under 1% of exits above $10M and about 5% below; these are effectively merger rates.")
-notes_T5 <- c("Tiers rank each credit union's modelled exit odds against others in its own asset category: High is the top 10%, Elevated the next 15%, Typical the middle half, Low the bottom quarter. The model uses size, growth over three and five years, volatility, history length, region, charter and acquisition history.",
-              "The first table is what the tiers MEAN: the same tiers were formed five years ago and the share that actually exited was counted. A tier is a frequency, not a prediction about any one institution.",
-              "No institution is named in this workbook.")
+find_src <- function(fn) {
+  cand <- c(fn, file.path("..", fn), file.path("S:/Projects/Credit_Union_Growth_Forecast", fn))
+  hit <- cand[file.exists(cand)][1]
+  if (is.na(hit)) stop(fn, " not found. Searched: ", paste(cand, collapse = ", "))
+  source(hit)
+}
+if (!exists("xl_block")) find_src("0_xlsx_helpers.R")
+if (!exists("zip_base")) find_src("0b_zip_base.R")      # must follow the helpers
 
-out_ok <- FALSE
-if (exists("mk_sheet") && exists("xlsx_write")) {
-  ensure <- function(x) { x[] <- lapply(x, function(v) if (is.factor(v)) as.character(v) else v); x }
-  SHm <- list(
-    mk_sheet("Merger rate by size", "Merger rate by asset size", cohort_lab, notes = notes_T1,
-             blocks = list(list(head = "Share of institutions exiting within the horizon (%)",
-                                df = ensure(T1), styles = c(S_NORM, rep(S_DEC, ncol(T1) - 1)))),
-             cols = col_widths(list(c(1, 1, 14), c(2, ncol(T1), 18)))),
-    mk_sheet("History", "One-year merger rate by year",
-             sprintf("Long-run average %.2f%%; environment factor at %s: %.2f", longrun, cohort_lab, env_factor_now),
-             notes = "The environment factor is the last two years' one-year rate divided by the long-run average; it scales the long-run curve to current conditions.",
-             blocks = list(list(head = "Origin year", df = ensure(T2), styles = c(S_INT, S_INT, S_DEC))),
-             cols = col_widths(list(c(1, 3, 20)))),
-    mk_sheet("Expected exits", "Expected exits from the cohort", cohort_lab,
-             notes = c("Expected number of today's institutions merging or closing by each date, from the merger-rate curve applied to each institution's own assets. Rounded sums of probabilities; not a count of named institutions."),
-             blocks = list(list(head = "By asset category", df = ensure(T3_cat), styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC, S_DEC)),
-                           list(head = "By region and charter", df = ensure(T3_cell), styles = c(S_NORM, S_NORM, S_INT, S_DEC, S_DEC, S_DEC, S_DEC)),
-                           list(head = "By state", df = ensure(T3_state), styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC, S_DEC))),
-             cols = col_widths(list(c(1, 2, 22), c(3, 7, 18)))),
-    mk_sheet("Risk tiers", "Consolidation-risk tiers", cohort_lab, notes = notes_T5,
-             blocks = list(list(head = sprintf("What the tiers mean: tiers formed at %s, exits counted by %s", qgrid$q_label[o_bt], cohort_lab),
-                                df = ensure(T5_hit), styles = c(S_NORM, S_INT, S_INT, S_DEC)),
-                           list(head = "Cohort institutions by category and tier", df = ensure(T5_now),
-                                styles = c(S_NORM, rep(S_INT, ncol(T5_now) - 1)))),
-             cols = col_widths(list(c(1, 1, 22), c(2, 8, 16)))))
-  if (!is.null(T4))
-    SHm[[length(SHm) + 1]] <- mk_sheet("Who absorbs whom", "Mergers by category of target and acquirer",
-             sprintf("Merger events since %d matched to both sides; acquirer's category measured a year before the event", START_YEAR),
-             notes = "Rows are the target's category when it exited; columns the acquirer's category four quarters before the event (measured at the event, the merger itself moves the acquirer up).",
-             blocks = list(list(head = "Number of mergers", df = ensure(T4), styles = c(S_NORM, rep(S_INT, ncol(T4) - 1)))),
-             cols = col_widths(list(c(1, 1, 22), c(2, ncol(T4), 14))))
-  OUTm <- sprintf("CU_Merger_Tables_%s.xlsx", cohort_lab)
-  xlsx_write(SHm, OUTm); out_ok <- TRUE
-  cat("\nWritten:", normalizePath(OUTm), "\n")
+sheet32 <- function(name, title, subtitle = NULL, notes = NULL, blocks = list(),
+                    cols = NULL, freeze = NULL) {
+  rows <- character(0); r <- 1
+  rows <- c(rows, xl_line(title, r, S_TITLE)); r <- r + 1
+  if (!is.null(subtitle)) { rows <- c(rows, xl_line(subtitle, r, S_SUB)); r <- r + 1 }
+  r <- r + 1
+  for (n in notes) { rows <- c(rows, xl_line(n, r, S_NORM)); r <- r + 1 }
+  if (length(notes)) r <- r + 1
+  for (b in blocks) {
+    if (!is.null(b$head)) { rows <- c(rows, xl_line(b$head, r, S_BOLD)); r <- r + 1 }
+    bl <- xl_block(b$df, r, col_styles = b$styles)
+    rows <- c(rows, bl$xml); r <- bl$next_row + 1
+  }
+  list(name = name, rows = rows, cols = cols, freeze = freeze, autofilter = NULL)
 }
-if (!out_ok) {
-  dir.create("merger_tables", showWarnings = FALSE)
-  for (nm in c("T1", "T2", "T3_cat", "T3_cell", "T3_state", "T5_hit", "T5_now"))
-    write.csv(get(nm), file.path("merger_tables", paste0(nm, "_", cohort_lab, ".csv")), row.names = FALSE)
-  if (!is.null(T4)) write.csv(T4, file.path("merger_tables", paste0("T4_", cohort_lab, ".csv")), row.names = FALSE)
-  cat("\n27's sheet helpers not in session -- tables written as CSV to Data/merger_tables/.\n")
-}
+chr <- function(x) { x[] <- lapply(x, function(v) if (is.factor(v)) as.character(v) else v); x }
+
+## ---- Read Me ----------------------------------------------------------
+readme <- data.frame(
+  Tab = c("Merger rate by size", "History", "Expected exits", "Who absorbs whom", "Risk tiers"),
+  `What it shows` = c(
+    "The chance that a credit union of a given size merges or closes within one, three or five years, for sizes from $1M to $10B. Read your institution's size down the first column.",
+    "The one-year merger rate for every year since 2007, and the long-run average. This is where the 'current' adjustment on the first tab comes from.",
+    "How many of today's institutions are expected to merge or close by each date, by asset category, by region and charter, and by state. Counts, not names.",
+    sprintf("Every merger since %d: the size category of the credit union absorbed (rows) against the size category of the acquirer (columns).", START_YEAR),
+    "Four consolidation-risk tiers, ranked within each asset category, with the share of each tier that actually merged when the same tiers were formed five years ago."),
+  `How to use it` = c(
+    "For planning: the 'Current, per year' column is the annual merger rate for institutions of that size.",
+    "For context: whether the merger pace right now is above or below normal.",
+    "For resource planning by region and state.",
+    "For understanding consolidation: who the typical acquirer of a small credit union is.",
+    "For prioritisation only: a tier is a frequency, not a prediction about any single institution. No institution is named."),
+  check.names = FALSE, stringsAsFactors = FALSE)
+
+SHm <- list(
+  sheet32("Read Me", "Credit union merger tables",
+          sprintf("Cohort %s, %s federally insured credit unions. Office of the Chief Economist.",
+                  cohort_lab, format(nrow(coh), big.mark = ",")),
+          notes = c("These tables describe mergers and closures: how often they happen by size of institution, how many to expect over the next five years and where, who absorbs whom, and which kinds of institutions carry elevated risk.",
+                    "Every rate is a frequency from the record of all federally insured credit unions since 2005. 'Exit' means merged into another credit union or closed; closures are under 1% of exits above $10M and about 5% below.",
+                    "Companion to the growth forecast workbook; the population counts there use the rates on the first tab."),
+          blocks = list(list(head = "Tabs", df = readme, styles = c(S_BOLD, S_WRAP, S_WRAP))),
+          cols = col_widths(list(c(1, 1, 24), c(2, 2, 90), c(3, 3, 60)))),
+
+  sheet32("Merger rate by size", "Merger rate by asset size",
+          sprintf("Share of credit unions of each size that merge or close within the horizon. Cohort %s.", cohort_lab),
+          notes = c("'Long-run' is the historical average for institutions of that size, from every credit union since 2005.",
+                    sprintf("'Current' scales the long-run rate by the merger-environment factor, %.2f: the last two years' one-year rate divided by the long-run average (see History). A factor of 1.00 means the merger pace is at its long-run normal.", env_factor_now),
+                    "'Current, per year' is the current five-year rate expressed as a constant annual rate.",
+                    "Rates are read from a smooth curve fitted to size, so a credit union between two rows sits between their values."),
+          blocks = list(list(head = "Share exiting within the horizon (%)", df = chr(T1),
+                             styles = c(S_NORM, rep(S_DEC, ncol(T1) - 1)))),
+          cols = col_widths(list(c(1, 1, 12), c(2, ncol(T1), 17))), freeze = list(x = 1, y = 0)),
+
+  sheet32("History", "One-year merger rate by year",
+          sprintf("Long-run average %.2f%%. Environment factor at %s: %.2f.", longrun, cohort_lab, env_factor_now),
+          notes = c("Share of institutions active at the start of each year that had merged or closed one year later.",
+                    "The environment factor compares the most recent two years with the long-run average and scales the rate curve on the first tab."),
+          blocks = list(list(head = "By origin year", df = chr(T2), styles = c(S_INT, S_INT, S_DEC))),
+          cols = col_widths(list(c(1, 3, 22)))),
+
+  sheet32("Expected exits", "Expected mergers and closures from today's institutions",
+          sprintf("Cohort %s. Total expected by %s: %.0f of %s (%.1f%%).", cohort_lab, H_LAB["20"],
+                  sum(coh$p20, na.rm = TRUE), format(nrow(coh), big.mark = ","), 100 * mean(coh$p20, na.rm = TRUE)),
+          notes = c("Each institution's own merger probability (from the rate curve at its assets) added up within each group. These are expected values rounded to one decimal, not counts of named institutions.",
+                    "'5yr rate' is the group's average five-year probability."),
+          blocks = list(list(head = "By asset category", df = chr(T3_cat), styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC, S_DEC)),
+                        list(head = "By region and charter", df = chr(T3_cell), styles = c(S_NORM, S_NORM, S_INT, S_DEC, S_DEC, S_DEC, S_DEC)),
+                        list(head = "By state, largest first", df = chr(T3_state), styles = c(S_NORM, S_INT, S_DEC, S_DEC, S_DEC, S_DEC))),
+          cols = col_widths(list(c(1, 2, 20), c(3, 7, 20)))),
+
+  sheet32("Risk tiers", "Consolidation-risk tiers",
+          sprintf("Cohort %s. Tiers are formed within each asset category.", cohort_lab),
+          notes = c("Each credit union is ranked against the others in its own asset category on a model of five-year exit odds (size, growth over three and five years, volatility, history length, region, charter, acquisition history). High = top 10%, Elevated = next 15%, Typical = middle half, Low = bottom quarter.",
+                    sprintf("The first table is what the tiers MEAN: the same tiers were formed at %s and the share that had exited by %s was counted. A tier is a measured frequency, not a prediction about any one institution.", qgrid$q_label[o_bt], cohort_lab),
+                    "No institution is named in this workbook."),
+          blocks = list(list(head = sprintf("What the tiers mean: formed at %s, exits counted by %s", qgrid$q_label[o_bt], cohort_lab),
+                             df = chr(T5_hit), styles = c(S_NORM, S_INT, S_INT, S_DEC)),
+                        list(head = "Today's institutions by category and tier", df = chr(T5_now),
+                             styles = c(S_NORM, rep(S_INT, ncol(T5_now) - 1)))),
+          cols = col_widths(list(c(1, 1, 20), c(2, 8, 18)))))
+
+if (!is.null(T4))
+  SHm[[length(SHm) + 1]] <- sheet32("Who absorbs whom", "Mergers by size of target and acquirer",
+          sprintf("All mergers since %d matched to both sides (%s events).", START_YEAR, format(sum(T4$Total), big.mark = ",")),
+          notes = c("Rows: the asset category of the credit union that was absorbed, at its last report. Columns: the asset category of the acquirer one year before the merger (measured at the merger, the acquisition itself moves the acquirer up a category).",
+                    "Read across a row to see who absorbs institutions of that size; read down a column to see what an acquirer of that size takes on."),
+          blocks = list(list(head = "Number of mergers", df = chr(T4), styles = c(S_NORM, rep(S_INT, ncol(T4) - 1)))),
+          cols = col_widths(list(c(1, 1, 20), c(2, ncol(T4), 15))))
+
+OUTm <- sprintf("CU_Merger_Tables_%s.xlsx", cohort_lab)
+xlsx_write(SHm, OUTm)
+cat("\nWritten:", normalizePath(OUTm), "\n")
+
 saveRDS(list(T1 = T1, T2 = T2, T3_cat = T3_cat, T3_cell = T3_cell, T3_state = T3_state,
              T4 = T4, T5_hit = T5_hit, T5_now = T5_now, env_factor_now = env_factor_now,
              EXIT_MODEL = EXIT_MODEL, SCRIPT32_VERSION = SCRIPT32_VERSION),
