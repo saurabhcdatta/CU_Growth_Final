@@ -42,7 +42,7 @@ library(dplyr); library(tidyr)
 
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 stopifnot(exists("feat"), exists("CAT_LABELS"), exists("N_CAT"), exists("N_Q"))
-SCRIPT31_VERSION <- "2026-09-21a"
+SCRIPT31_VERSION <- "2026-09-21b"
 cat("31_peer_groups.R version", SCRIPT31_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -89,8 +89,8 @@ cl_prep <- function(D, vars = CL_VARS, stats = NULL) {
 
 cl_fit <- function(D, k = CL_K, vars = CL_VARS) {
   pr <- cl_prep(D, vars)
-  km <- kmeans(pr$X, centers = k, nstart = CL_NSTART, iter.max = 100,
-               algorithm = "Lloyd")
+  km <- kmeans(pr$X, centers = k, nstart = CL_NSTART, iter.max = 300,
+               algorithm = "MacQueen")
   list(centers = km$centers, stats = pr$stats, vars = vars, k = k,
        size = km$size, withinss = km$tot.withinss)
 }
@@ -138,8 +138,8 @@ atyp_score <- function(D, fit) {
 ## Sub-sample for speed; the elbow is stable well below the full panel.
 samp <- feat[sample(nrow(feat), min(150000L, nrow(feat))), ]
 pr_s <- cl_prep(samp)
-elbow <- sapply(2:12, function(k) kmeans(pr_s$X, k, nstart = 3, iter.max = 100,
-                                          algorithm = "Lloyd")$tot.withinss)
+elbow <- sapply(2:12, function(k) kmeans(pr_s$X, k, nstart = 3, iter.max = 300,
+                                          algorithm = "MacQueen")$tot.withinss)
 elbow_tbl <- data.frame(k = 2:12, within_ss = round(elbow),
                         drop_pct = round(100 * c(NA, -diff(elbow) / head(elbow, -1)), 1))
 cat("\nWithin-cluster sum of squares by k (look for where the drop flattens):\n")
@@ -161,12 +161,22 @@ unscale <- function(x, v) {
   if (exists("SCALE_MU") && exists("SCALE_SD") && v %in% names(SCALE_MU))
     x * SCALE_SD[[v]] + SCALE_MU[[v]] else x
 }
+## Rebuild trailing growth and volatility from y_raw directly (log assets
+## in dollars, unscaled) rather than trusting the scaling statistics'
+## names. Growth over the past 12/20 quarters; volatility as the sd of
+## quarterly log changes over the past 8 quarters.
+stopifnot("y_raw" %in% names(feat))
 feat_desc <- feat %>%
-  mutate(assets_raw = if ("y_raw" %in% names(feat)) exp(y_raw) else exp(unscale(y, "y")),
-         g12_raw = unscale(g12, "g12"), g20_raw = unscale(g20, "g20"),
-         vol_raw = unscale(vol, "vol"))
-if (!("y_raw" %in% names(feat)) && !exists("SCALE_MU"))
-  cat("NOTE: neither y_raw nor SCALE_MU found -- growth and assets below are in z-score units.\n")
+  arrange(join_number, q_index) %>%
+  group_by(join_number) %>%
+  mutate(assets_raw = exp(y_raw),
+         .gap12 = q_index - lag(q_index, 12), .gap20 = q_index - lag(q_index, 20),
+         g12_raw = ifelse(.gap12 == 12, y_raw - lag(y_raw, 12), NA_real_),
+         g20_raw = ifelse(.gap20 == 20, y_raw - lag(y_raw, 20), NA_real_),
+         .dq = ifelse(q_index - lag(q_index) == 1, y_raw - lag(y_raw), NA_real_),
+         vol_raw = sapply(seq_along(.dq), function(i)
+           if (i >= 8) sd(.dq[(i - 7):i], na.rm = TRUE) else NA_real_)) %>%
+  ungroup() %>% select(-.gap12, -.gap20, -.dq)
 
 desc <- feat_desc %>%
   group_by(peer) %>%
@@ -174,7 +184,7 @@ desc <- feat_desc %>%
             median_assets_M = round(median(assets_raw) / 1e6, 1),
             growth_3y_pct = round(100 * (exp(median(g12_raw, na.rm = TRUE)) - 1), 1),
             growth_5y_pct = round(100 * (exp(median(g20_raw, na.rm = TRUE)) - 1), 1),
-            volatility = round(median(vol_raw, na.rm = TRUE), 3),
+            volatility_qtr = round(median(vol_raw, na.rm = TRUE), 3),   # sd of quarterly log growth
             acquisitions = round(mean(acq_cum > 0), 2),
             exit_1y_pct = round(100 * mean(exit_h4[usable_h4]), 2),
             exit_5y_pct = round(100 * mean(exit_h20[usable_h20]), 1),
@@ -202,7 +212,7 @@ name_peers <- function(d) {
       if (is.finite(d$growth_5y_pct[i]) && d$growth_5y_pct[i] < -10) "shrinking"
       else if (is.finite(d$growth_5y_pct[i]) && d$growth_5y_pct[i] > 30) "growing" else "flat",
       if (d$acquisitions[i] >= 0.5) "acquirer" else "",
-      if (d$volatility[i] > quantile(d$volatility, .75, na.rm = TRUE)) "volatile" else "")
+      if (d$volatility_qtr[i] > quantile(d$volatility_qtr, .75, na.rm = TRUE)) "volatile" else "")
   }
   setNames(trimws(gsub("  +", " ", lab)), d$peer)
 }
