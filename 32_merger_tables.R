@@ -32,7 +32,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr); library(splines)
-SCRIPT32_VERSION <- "2026-09-24e"
+SCRIPT32_VERSION <- "2026-09-25a"
 cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -41,9 +41,10 @@ cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 if (!exists("feat"))      { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("fc"))        { prb <- readRDS("panel_probs.rds");    list2env(prb, .GlobalEnv) }
 if (!exists("inst_out"))  { asg <- readRDS("panel_assign.rds");   list2env(asg, .GlobalEnv) }
-if (!exists("P_EXIT_ALT") && file.exists("panel_exit_models.rds")) {
-  .m <- readRDS("panel_exit_models.rds"); P_EXIT_ALT <- .m$P_EXIT_ALT; rm(.m)
+if ((!exists("P_EXIT_ALT") || !exists("env_now")) && file.exists("panel_exit_models.rds")) {
+  .m <- readRDS("panel_exit_models.rds"); P_EXIT_ALT <- .m$P_EXIT_ALT; env_now <- .m$env_now; rm(.m)
 }
+if (!exists("env_now")) env_now <- NULL
 if (!exists("flow_tbl") && file.exists("panel_peers.rds")) {
   .pp <- readRDS("panel_peers.rds"); list2env(.pp, .GlobalEnv); rm(.pp)
 }
@@ -81,6 +82,22 @@ env_factor_now <- {
 cat(sprintf("Merger-environment factor at %s: %.2f (recent one-year rate / long-run)\n",
             cohort_lab, env_factor_now))
 
+## The factor the CHOSEN model applies, as a function of y (standardised
+## log assets) and of category, so the 'Current' columns below reproduce
+## the published counts. size_env2 bends the factor with size; cat_env2
+## uses a shrunk factor per category; everything else one aggregate number.
+env_fn <- function(y, cat_k) {
+  if (EXIT_MODEL == "size_env2" && !is.null(env_now$curve))
+    approx(env_now$curve$y, env_now$curve$factor, xout = y, rule = 2)$y
+  else if (EXIT_MODEL == "cat_env2" && !is.null(env_now$factor_cat))
+    env_now$factor_cat[cat_k]
+  else rep(env_factor_now, length(y))
+}
+ENV_DESC <- switch(EXIT_MODEL,
+  size_env2 = "a merger-environment factor that varies with size (recent one-year rate over long-run, as a smooth curve in assets)",
+  cat_env2  = "a merger-environment factor specific to each asset category (recent one-year rate over long-run, shrunk toward the aggregate)",
+  sprintf("the merger-environment factor, %.2f: the last two years' one-year rate divided by the long-run average", env_factor_now))
+
 grid_usd <- c(1e6, 2e6, 5e6, 10e6, 25e6, 50e6, 100e6, 250e6, 500e6, 1e9, 2.5e9, 5e9, 10e9)
 y_scale  <- function(a) {   # feat$y is standardised log assets; recover the mapping from y_raw
   fit <- lm(y ~ y_raw, data = feat[sample(nrow(feat), min(50000L, nrow(feat))), ])
@@ -94,7 +111,8 @@ for (h in H_SET) {
   m  <- glm(ex ~ ns(y, df = 5), data = d, family = binomial())
   p  <- predict(m, newdata = data.frame(y = y_scale(grid_usd)), type = "response")
   T1[[paste0("Long-run ", H_LAB[as.character(h)], " (%)")]] <- round(100 * p, 1)
-  T1[[paste0("Current ", H_LAB[as.character(h)], " (%)")]]  <- round(100 * pmin(p * env_factor_now, 1), 1)
+  T1[[paste0("Current ", H_LAB[as.character(h)], " (%)")]]  <-
+    round(100 * pmin(p * env_fn(y_scale(grid_usd), NA), 1), 1)
 }
 T1[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1[["Current 5yr (%)"]] / 100)^(1/5)), 2)
 cat("\nT1 -- merger rate by asset size (share exiting within the horizon):\n")
@@ -109,23 +127,38 @@ fc_now <- feat %>% filter(q_index == N_Q) %>%
   select(join_number, y, cat_k)
 T1b <- data.frame(Category = CAT_PRETTY[CAT_LABELS], Institutions = 0L,
                   check.names = FALSE, stringsAsFactors = FALSE)
-T1b$Institutions <- as.integer(table(factor(fc_now$cat_k, levels = seq_len(N_CAT))))
+T1b$Institutions <- as.integer(table(factor(inst_out$asset_cat_now[inst_out$join_number %in% fc$join_number],
+                                            levels = seq_len(N_CAT))))
 for (h in H_SET) {
   us <- feat[[paste0("usable_h", h)]]
   d  <- feat[us, ]; d$ex <- d[[paste0("exit_h", h)]]
   m  <- glm(ex ~ ns(y, df = 5), data = d, family = binomial())
   p  <- predict(m, newdata = fc_now, type = "response")
   lr <- tapply(p, factor(fc_now$cat_k, levels = seq_len(N_CAT)), mean)
+  cu <- tapply(pmin(p * env_fn(fc_now$y, fc_now$cat_k), 1), factor(fc_now$cat_k, levels = seq_len(N_CAT)), mean)
   T1b[[paste0("Long-run ", H_LAB[as.character(h)], " (%)")]] <- round(100 * as.numeric(lr), 1)
-  T1b[[paste0("Current ", H_LAB[as.character(h)], " (%)")]]  <- round(100 * pmin(as.numeric(lr) * env_factor_now, 1), 1)
+  T1b[[paste0("Current ", H_LAB[as.character(h)], " (%)")]]  <- round(100 * as.numeric(cu), 1)
 }
 T1b[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1b[["Current 5yr (%)"]] / 100)^(1/5)), 2)
+T1b[["Environment factor"]] <- round(as.numeric(tapply(env_fn(fc_now$y, fc_now$cat_k),
+                                                       factor(fc_now$cat_k, levels = seq_len(N_CAT)), mean)), 2)
+## Institutions still operating after five years (whatever their size by
+## then), from today's count and each five-year rate.
+T1b[["Still operating in 5 yrs (long-run)"]] <- round(T1b$Institutions * (1 - T1b[["Long-run 5yr (%)"]] / 100))
+T1b[["Still operating in 5 yrs (current)"]]  <- round(T1b$Institutions * (1 - T1b[["Current 5yr (%)"]] / 100))
 ## Realised history alongside, for the reader who wants the raw record:
 ## the share of institutions in each category since 2005 that exited
 ## within five years (26's category rate, full basis).
 hist5 <- feat %>% filter(usable_h20) %>% group_by(cat_k) %>%
   summarise(r = 100 * mean(exit_h20), .groups = "drop")
 T1b[["Realised 5yr since 2005 (%)"]] <- round(hist5$r[match(seq_len(N_CAT), hist5$cat_k)], 1)
+tot <- T1b[1, ]; tot[] <- NA; tot$Category <- "All institutions"
+tot$Institutions <- sum(T1b$Institutions)
+for (v in c("Still operating in 5 yrs (long-run)", "Still operating in 5 yrs (current)")) tot[[v]] <- sum(T1b[[v]])
+tot[["Long-run 5yr (%)"]] <- round(100 * (1 - tot[["Still operating in 5 yrs (long-run)"]] / tot$Institutions), 1)
+tot[["Current 5yr (%)"]]  <- round(100 * (1 - tot[["Still operating in 5 yrs (current)"]]  / tot$Institutions), 1)
+tot[["Current, per year (%)"]] <- round(100 * (1 - (1 - tot[["Current 5yr (%)"]] / 100)^(1/5)), 2)
+T1b <- rbind(T1b, tot)
 cat("\nT1b -- merger rate by asset category:\n")
 print(T1b, row.names = FALSE)
 
@@ -381,12 +414,14 @@ SHm <- list(
   sheet32("Merger rate by size", "Merger rate by asset size",
           sprintf("Share of credit unions of each size that merge or close within the horizon. Cohort %s.", cohort_lab),
           notes = c("'Long-run' is the historical average for institutions of that size, from every credit union since 2005.",
-                    sprintf("'Current' scales the long-run rate by the merger-environment factor, %.2f: the last two years' one-year rate divided by the long-run average (see History). A factor of 1.00 means the merger pace is at its long-run normal.", env_factor_now),
+                    sprintf("'Current' scales the long-run rate by %s (see History). A factor of 1.00 means that size class is merging at its long-run pace; 1.50 means half again as fast. The 'Environment factor' column shows the average factor applied in each category.", ENV_DESC),
                     "'Current, per year' is the current five-year rate expressed as a constant annual rate.",
                     "The category table is the average of the size curve over the institutions in each category today; the size table is the curve itself, so a credit union between two rows sits between their values.",
-                    "'Realised 5yr since 2005' is the raw record: the share of institutions in that category, at any point since 2005, that had exited five years later."),
+                    "'Realised 5yr since 2005' is the raw record: the share of institutions in that category, at any point since 2005, that had exited five years later.",
+                    "'Still operating in 5 yrs' is today's count less the expected exits at each five-year rate: the institutions still in the system in five years, whatever their size by then (some will have moved category)."),
           blocks = list(list(head = "By asset category: share exiting within the horizon (%)",
-                             df = chr(T1b), styles = c(S_NORM, S_INT, rep(S_DEC, ncol(T1b) - 2))),
+                             df = chr(T1b), styles = c(S_NORM, S_INT, rep(S_DEC, ncol(T1b) - 4), S_INT, S_INT)),
+                        ## column order: ..., Current per year, Environment factor, Still operating x2
                         list(head = "By asset size: share exiting within the horizon (%)", df = chr(T1),
                              styles = c(S_NORM, rep(S_DEC, ncol(T1) - 1)))),
           cols = col_widths(list(c(1, 1, 16), c(2, 2, 12), c(3, ncol(T1b), 17))), freeze = list(x = 1, y = 0)),

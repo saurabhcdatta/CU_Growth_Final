@@ -60,7 +60,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-23a"
+SCRIPT30_VERSION <- "2026-09-24a"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("feat")) { fts <- readRDS("panel_features.rds"); list2env(fts, .GlobalEnv) }
 if (!exists("make_folds")) { cvr <- readRDS("panel_cv.rds"); make_folds <- cvr$make_folds }
@@ -185,8 +185,61 @@ env_factor <- function(origin) {
   min(max(mean(recent) / mean(e1), 0.5), 2)
 }
 
+## Size-varying environment factor. 32's History tab showed every asset
+## category merging faster than its own history (factors 1.1 to 2.5) while
+## the aggregate factor read 1.02: the population has shifted toward large
+## institutions, which merge less, and that offsets the acceleration within
+## every band. One number applied to everyone therefore under-corrects the
+## middle of the system. This estimates the recent-vs-long-run ratio as a
+## smooth function of log assets: a logit on one-year exits closed before
+## the origin, with a recent-window term whose effect bends with size.
+## Smooth so a thin category (the $10B+ band has ~170 recent institution-
+## quarters) borrows from its neighbours. Clamped to [0.5, 3].
+env_curve <- function(origin) {
+  us <- feat$usable_h4 & feat$q_index <= origin - 4L
+  d  <- data.frame(ex = feat$exit_h4[us], y = feat$y[us],
+                   recent = as.numeric(feat$q_index[us] > origin - 4L - ENV_WINDOW_Q))
+  if (sum(d$recent) < 500 || nrow(d) < 5000) return(function(y) rep(1, length(y)))
+  m <- tryCatch(suppressWarnings(glm(ex ~ splines::ns(y, df = 5) + recent + recent:splines::ns(y, df = 3),
+                                     data = d, family = binomial())), error = function(e) NULL)
+  if (is.null(m)) return(function(y) rep(1, length(y)))
+  rng <- range(d$y)
+  function(y) {
+    yy <- pmin(pmax(y, rng[1]), rng[2])
+    p1 <- predict(m, newdata = data.frame(y = yy, recent = 1), type = "response")
+    p0 <- predict(m, newdata = data.frame(y = yy, recent = 0), type = "response")
+    pmin(pmax(p1 / p0, 0.5), 3)
+  }
+}
+
+## Category-specific environment factor: recent / long-run one-year rate
+## within each category, shrunk toward the aggregate factor with a prior
+## weight of ENV_SHRINK_N institution-quarters so thin categories do not
+## get a factor of 4 from 170 observations. Clamped to [0.5, 3].
+ENV_SHRINK_N <- cfg_get("EXIT_ENV_SHRINK_N", 2000)
+env_factor_cat <- function(origin) {
+  us <- feat$usable_h4 & feat$q_index <= origin - 4L
+  e1 <- feat$exit_h4[us]; q1 <- feat$q_index[us]; k1 <- feat$cat_k[us]
+  rec <- q1 > origin - 4L - ENV_WINDOW_Q
+  if (sum(rec) < 500 || length(e1) < 5000) return(rep(1, N_CAT))
+  f_all <- mean(e1[rec]) / mean(e1)
+  out <- rep(f_all, N_CAT)
+  for (k in seq_len(N_CAT)) {
+    lr <- mean(e1[k1 == k]); n_r <- sum(rec & k1 == k)
+    if (n_r > 0 && is.finite(lr) && lr > 0) {
+      f_k <- mean(e1[rec & k1 == k]) / lr
+      out[k] <- (n_r * f_k + ENV_SHRINK_N * f_all) / (n_r + ENV_SHRINK_N)
+    }
+  }
+  pmin(pmax(out, 0.5), 3)
+}
+
 m_cat      <- function(tr, te, h) cat_rate(tr, te)
 m_cat_env  <- function(tr, te, h) cat_rate(tr, te) * env_factor(min(te$q_index))
+m_cat_env2 <- function(tr, te, h) {
+  f <- env_factor_cat(min(te$q_index))
+  pmin(cat_rate(tr, te) * f[te$cat_k], 1)
+}
 
 ## region and cu_type are numeric codes from [30.0]; the logit must still
 ## treat them as categories, hence factor() in the formula.
@@ -422,6 +475,10 @@ m_size <- function(tr, te, h) {
   predict(m, newdata = te, type = "response")
 }
 m_size_env <- function(tr, te, h) m_size(tr, te, h) * env_factor(min(te$q_index))
+m_size_env2 <- function(tr, te, h) {
+  ec <- env_curve(min(te$q_index))
+  pmin(m_size(tr, te, h) * ec(te$y), 1)
+}
 
 ## Hybrid on the asset-based level: the size curve sets the level within
 ## each category (summed over its members), the full logit ranks within it.
@@ -471,8 +528,8 @@ if (HAVE_PEERS) {
   }
 }
 
-CANDS <- list(cat = m_cat, cat_env = m_cat_env,
-              size = m_size, size_env = m_size_env,
+CANDS <- list(cat = m_cat, cat_env = m_cat_env, cat_env2 = m_cat_env2,
+              size = m_size, size_env = m_size_env, size_env2 = m_size_env2,
               logit = m_logit, cat_logit = m_cat_logit, size_logit = m_size_logit)
 if (HAVE_PEERS) { CANDS$peer <- m_peer; CANDS$peer_env <- m_peer_env; CANDS$logit_cl <- m_logit_cl }
 if (!is.null(FIN_VARS)) CANDS$logit_fin <- m_logit_fin
@@ -594,7 +651,7 @@ if (best != ref_name && (ref_score - v5$score[1]) < 3) {
 ## the winner, take it. Differences that small are inside the fold noise,
 ## and the stakeholders asked for an asset-based method. Sept 2026 run:
 ## cat_env 18.8 vs size_env 20.8, tied on weighted allocation (12.8).
-size_fam <- v5 %>% filter(model %in% c("size", "size_env", "size_logit")) %>% arrange(score)
+size_fam <- v5 %>% filter(model %in% c("size", "size_env", "size_env2", "size_logit")) %>% arrange(score)
 if (nrow(size_fam) && !(best %in% size_fam$model) &&
     (size_fam$score[1] - v5$score[1]) < 3) {
   cat(sprintf("'%s' is within %.1f points of '%s' and is asset-based: taking '%s'.\n",
@@ -633,7 +690,14 @@ cat("Expected five-year exits by model:",
     paste(sprintf("%s %.0f", names(P_EXIT_ALT),
                   sapply(P_EXIT_ALT, function(x) sum(x[["20"]], na.rm = TRUE))), collapse = " | "), "\n")
 
-saveRDS(list(cv_exit = cv_exit, summ = summ, verdict = best,
+## Environment at the cohort date, for 32's tables: the aggregate factor,
+## the category factors, and the size curve evaluated on a grid of y.
+env_now <- list(factor_all = env_factor(N_Q), factor_cat = env_factor_cat(N_Q))
+.ec <- env_curve(N_Q); .yg <- seq(min(feat$y, na.rm = TRUE), max(feat$y, na.rm = TRUE), length.out = 200)
+env_now$curve <- data.frame(y = .yg, factor = .ec(.yg)); rm(.ec, .yg)
+cat(sprintf("\nEnvironment at %s: aggregate factor %.2f; by category: %s\n", qgrid$q_label[N_Q],
+            env_now$factor_all, paste(sprintf("%.2f", env_now$factor_cat), collapse = " / ")))
+saveRDS(list(cv_exit = cv_exit, summ = summ, verdict = best, env_now = env_now,
              P_EXIT_ALT = P_EXIT_ALT, CANDS = names(CANDS),
              FIN_VARS = FIN_VARS, TREE_PKG = TREE_PKG,
              ENV_WINDOW_Q = ENV_WINDOW_Q, rhs_base = rhs_base, rhs_fin = rhs_fin,
