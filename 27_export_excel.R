@@ -44,7 +44,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 
-SCRIPT27_VERSION <- "2026-09-21d"
+SCRIPT27_VERSION <- "2026-09-21e"
 cat("27_export_excel.R version", SCRIPT27_VERSION, "\n")
 
 ## The helpers live in the project root, not in Data. Search a few likely
@@ -71,14 +71,27 @@ find_src("0_xlsx_helpers.R")
 find_src("0b_zip_base.R")
 
 ## The writer must carry the 22 Sep pane fix (Excel opened the workbook as
-## "Repaired" without it). A warm session keeps the OLD xlsx_write() unless
-## the files are re-sourced, so check the function in the session, re-source
-## if it is the old one, and say so if the files on disk are old too.
+## "Repaired" without it: "View from /xl/worksheets/sheet2.xml part" is the
+## columns-only frozen pane). find_src() takes the FIRST copy it finds --
+## the working directory (Data) before the project root -- so name the copy
+## in use, say whether it has the fix, and re-source it if the session
+## still holds the old function.
+find_path <- function(fn) {
+  cand <- c(fn, file.path("..", fn), file.path("S:/Projects/Credit_Union_Growth_Forecast", fn))
+  hit <- cand[file.exists(cand)][1]
+  if (is.na(hit)) NA_character_ else normalizePath(hit)
+}
+file_has_fix <- function(p) !is.na(p) && any(grepl("topRight", readLines(p, warn = FALSE), fixed = TRUE))
 writer_ok <- function() exists("xlsx_write") && grepl("topRight", paste(deparse(xlsx_write), collapse = ""), fixed = TRUE)
-if (!writer_ok())
-  warning("0_xlsx_helpers.R / 0b_zip_base.R on disk are the versions from before 22 Sep 2026 (no pane fix): ",
-          "replace them at the project root, then run 27 -> 29 -> 32 or restart R.")
-cat("xlsx writer:", if (writer_ok()) "22 Sep pane fix present" else "OLD", "\n")
+.wp <- find_path("0b_zip_base.R"); .hp <- find_path("0_xlsx_helpers.R")
+if (!writer_ok()) { find_src("0_xlsx_helpers.R"); find_src("0b_zip_base.R") }
+cat("xlsx writer in use:", .wp, sprintf("(md5 %s)", substr(unname(tools::md5sum(.wp)), 1, 8)),
+    "| pane fix in that file:", if (file_has_fix(.wp)) "yes" else "NO", "| in this session:", if (writer_ok()) "yes" else "NO", "\n")
+if (!file_has_fix(.wp) || !file_has_fix(.hp))
+  warning("The writer copy in use, ", .wp, ", is from before 22 Sep 2026 (no pane fix), so Excel will open the workbook ",
+          "as 'Repaired'. Replace it -- or delete it if the new copy sits at the project root: the search order is the working ",
+          "directory (Data), then the root. Then restart R (or rm(xlsx_write, zip_base, xl_block)) and run 27 -> 29 -> 32.")
+rm(.wp, .hp)
 stopifnot(exists("zip_base"))
 
 ## Load whatever the session is missing. Each file is loaded only if one of
