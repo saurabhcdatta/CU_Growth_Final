@@ -98,7 +98,7 @@ library(tidyr)
 ## [26.0] Objects. Everything below is in the session after 20 -> 24. If
 ## starting cold, the rds files carry what is needed.
 ## ---------------------------------------------------------------------
-SCRIPT26_VERSION <- "2026-09-21a"
+SCRIPT26_VERSION <- "2026-09-21b"
 cat("26_exit_adjustment.R version", SCRIPT26_VERSION, "\n")
 if (!exists("CAT_LABELS") || !exists("N_Q") || !exists("qgrid") || !exists("START_YEAR")) {   # 20's constants live in panel_prep.rds
   .pp <- readRDS("panel_prep.rds")
@@ -148,7 +148,13 @@ ENV_NOW_30 <- NULL
 if (EXIT_MODEL != "cat") {
   if (file.exists("panel_exit_models.rds")) {
     .m <- readRDS("panel_exit_models.rds")
-    P_EXIT_ALT <- .m$P_EXIT_ALT; ENV_NOW_30 <- .m$env_now; rm(.m)
+    P_EXIT_ALT <- .m$P_EXIT_ALT; ENV_NOW_30 <- .m$env_now
+    ## 30 (2026-09-25a on) saves the cohort it scored; same institutions, same order, or stop.
+    if (!is.null(.m$cohort_join) &&
+        !identical(as.character(.m$cohort_join), as.character(fc$join_number)))
+      stop("panel_exit_models.rds was written for a different cohort (or row order) than panel_probs.rds. ",
+           "Run 31 -> 30 for this cohort, then 26.")
+    rm(.m)
   }
   if (!exists("P_EXIT_ALT") || is.null(P_EXIT_ALT[[EXIT_MODEL]])) {
     warning("EXIT_MODEL = '", EXIT_MODEL, "' requested but 30 has not produced it; using category rates.")
@@ -249,12 +255,22 @@ print(as.data.frame(exit_wide), row.names = FALSE)
 ## way 30's cross-validation does. Without this the block shows the
 ## un-adjusted rates' 20-25% under-prediction under counts that no longer
 ## use them. Same maths as env_factor() / env_factor_cat() in 30.
-ENV_WINDOW_Q <- cfg_get("EXIT_ENV_WINDOW_Q", 8L)
+## The factor's window depends on the horizon (max(8, h) quarters since 21
+## Sep 2026; see 30 [30.1] and the config). One number in the config still
+## means that window at every horizon.
+ENV_WINDOW_Q <- cfg_get("EXIT_ENV_WINDOW_Q", c("4" = 8L, "12" = 12L, "20" = 20L))
+env_window <- function(h) {
+  w <- ENV_WINDOW_Q
+  if (length(w) == 1L) return(as.integer(w))
+  stopifnot(as.character(h) %in% names(w))
+  as.integer(w[[as.character(h)]])
+}
+ENV_WINDOW <- setNames(sapply(H_SET, env_window), as.character(H_SET))
 ENV_SHRINK_N <- cfg_get("EXIT_ENV_SHRINK_N", 2000)
-env_at <- function(origin) {           # aggregate factor and shrunk category factors at an origin
+env_at <- function(origin, h) {        # aggregate factor and shrunk category factors at an origin, for horizon h
   us  <- feat$usable_h4 & feat$q_index <= origin - 4L
   e1  <- feat$exit_h4[us]; q1 <- feat$q_index[us]; k1 <- feat$cat_k[us]
-  rec <- q1 > origin - 4L - ENV_WINDOW_Q
+  rec <- q1 > origin - 4L - env_window(h)
   if (sum(rec) < 500 || length(e1) < 5000) return(list(all = 1, cat = rep(1, N_CAT)))
   f_all <- mean(e1[rec]) / mean(e1); out <- rep(f_all, N_CAT)
   for (k in seq_len(N_CAT)) {
@@ -285,7 +301,7 @@ exit_bt <- bind_rows(lapply(H_SET, function(h) {
                                         data.frame(cat_k = k, rate = src$rate[1], n = 0L))
   }
   if (BT_ENV %in% c("cat_env", "cat_env2", "size_env", "size_env2")) {
-    f <- env_at(o)
+    f <- env_at(o, h)
     fk <- if (BT_ENV %in% c("cat_env2", "size_env2")) f$cat else rep(f$all, N_CAT)
     rates_o <- rates_o %>% mutate(rate = pmin(rate * fk[cat_k], 1))
   }
@@ -304,13 +320,13 @@ exit_bt_tot <- exit_bt %>% group_by(h, origin) %>%
 cat("\nBacktest totals (rates as applied under EXIT_MODEL =", BT_ENV, "):\n")
 print(as.data.frame(exit_bt_tot), row.names = FALSE)
 if (BT_ENV %in% c("cat_env2", "size_env2")) for (h in H_SET)
-  cat(sprintf("  environment factors at %s: %s\n", qgrid$q_label[N_Q - h],
-              paste(sprintf("%.2f", env_at(N_Q - h)$cat), collapse = " / ")))
+  cat(sprintf("  environment factors at %s (%d-quarter window): %s\n", qgrid$q_label[N_Q - h], env_window(h),
+              paste(sprintf("%.2f", env_at(N_Q - h, h)$cat), collapse = " / ")))
 ## What the backtest tested, in words; 27 prints it over the block.
 BT_NOTE <- switch(BT_ENV,
   cat       = sprintf("category rates on the '%s' basis, as applied", EXIT_BASIS),
-  cat_env   = "long-run category rates times the system-wide merger-environment factor measured at each past date, as applied",
-  cat_env2  = "long-run category rates times each category's merger-environment factor measured at each past date, as applied",
+  cat_env   = "long-run category rates times the system-wide merger-environment factor measured at each past date (same window as that horizon uses today), as applied",
+  cat_env2  = "long-run category rates times each category's merger-environment factor measured at each past date (same window as that horizon uses today), as applied",
   size_env  = "a category-rate approximation of the size curve, times the merger-environment factor measured at each past date",
   size_env2 = "a category-rate approximation of the size curve, times the category merger-environment factors measured at each past date",
   sprintf("long-run category rates only; the '%s' model itself is back-tested in script 30", BT_ENV))
@@ -318,6 +334,67 @@ cat("\nThe backtest tested:", BT_NOTE, "\n")
 cat("A ratio near 1 means the rates as applied were unbiased in aggregate from\n",
     "that date. Above 1: more exits happened than predicted. The category\n",
     "table above shows where; 30's cross-validation is the fuller test.\n")
+
+## ---------------------------------------------------------------------
+## [26.3b] The rolling-origin record: how far off has this method been?
+## ---------------------------------------------------------------------
+## [26.3] tests ONE past date per horizon. This repeats it from each of the
+## last ROLL_N dates whose outcome is known -- the dates 30's folds cover --
+## with the rates exactly as applied: long-run category rates from windows
+## closed by that date, times the factor measured AT that date over the
+## window that horizon uses. 27 turns the spread of actual / predicted
+## into the range printed beside the expected exits. 33 is the same
+## arithmetic across alternative windows; this is the production spec
+## only. Category means on cumulative tables, so it takes seconds.
+ROLL_N <- 32L
+roll_factor <- if (EXIT_MODEL %in% c("cat_env2", "size_env2")) "cat" else
+               if (EXIT_MODEL %in% c("cat_env", "size_env")) "all" else "none"
+exit_roll <- NULL; exit_roll_summ <- NULL
+if (EXIT_MODEL != "cat" || EXIT_BASIS == "full") {
+  roll_tab <- function(q, k, w = NULL) {
+    f <- list(factor(q, levels = seq_len(N_Q)), factor(k, levels = seq_len(N_CAT)))
+    m <- if (is.null(w)) table(f[[1]], f[[2]]) else tapply(w, f, sum)
+    m <- matrix(as.numeric(m), N_Q, N_CAT); m[is.na(m)] <- 0; m
+  }
+  roll_rows <- list()
+  for (h in H_SET) {
+    us <- feat[[paste0("usable_h", h)]]
+    roll_n <- roll_tab(feat$q_index[us], feat$cat_k[us])
+    roll_e <- roll_tab(feat$q_index[us], feat$cat_k[us], feat[[paste0("exit_h", h)]][us])
+    cum_n <- apply(roll_n, 2, cumsum); cum_e <- apply(roll_e, 2, cumsum)
+    origins <- seq(N_Q - h - ROLL_N + 1L, N_Q - h); origins <- origins[origins > 30 & origins - h >= 1]
+    for (o in origins) {
+      n <- cum_n[o - h, ]; r <- ifelse(n > 0, cum_e[o - h, ] / n, NA_real_)   # windows closed by the origin
+      for (k in seq_len(N_CAT)) if (n[k] < MIN_EXIT_POOL) {                   # thin category borrows from below
+        src <- which(n[seq_len(k - 1)] >= MIN_EXIT_POOL)
+        if (length(src)) r[k] <- r[max(src)]
+      }
+      f  <- env_at(o, h)
+      fk <- switch(roll_factor, cat = f$cat, all = rep(f$all, N_CAT), none = rep(1, N_CAT))
+      pred <- roll_n[o, ] * pmin(r * fk, 1); pred[!is.finite(pred)] <- 0
+      roll_rows[[length(roll_rows) + 1]] <- data.frame(
+        h = h, origin = o, q_label = qgrid$q_label[o],
+        predicted = sum(pred), actual = sum(roll_e[o, ]), stringsAsFactors = FALSE)
+    }
+  }
+  exit_roll <- bind_rows(roll_rows) %>% mutate(ratio = actual / predicted)
+  exit_roll_summ <- exit_roll %>% group_by(h) %>%
+    summarise(origins = n(), from = q_label[which.min(origin)], to = q_label[which.max(origin)],
+              level = sum(predicted) / sum(actual),                 # predicted / actual, all dates pooled (30's convention)
+              lo = min(ratio), p10 = quantile(ratio, 0.10, names = FALSE),
+              p90 = quantile(ratio, 0.90, names = FALSE), hi = max(ratio),
+              worst_date = q_label[which.max(abs(log(ratio)))],
+              last = ratio[which.max(origin)], .groups = "drop")
+  cat("\nRolling-origin record, rates as applied (actual / predicted at each past date):\n")
+  print(exit_roll_summ %>% mutate(across(c(level, lo, p10, p90, hi, last), ~ round(.x, 2))) %>%
+          as.data.frame(), row.names = FALSE)
+  ## The most recent date of the record IS [26.3]'s backtest, done another way; they must agree.
+  .chk <- exit_roll_summ %>% select(h, roll = last) %>% left_join(exit_bt_tot %>% select(h, bt = ratio), by = "h")
+  if (any(abs(round(.chk$roll, 2) - .chk$bt) > 0.011))
+    warning("[26.3b] and [26.3] disagree at the most recent date: ",
+            paste(sprintf("h=%d %.2f vs %.2f", .chk$h, .chk$roll, .chk$bt), collapse = "; "))
+  rm(.chk, roll_n, roll_e, cum_n, cum_e)
+} else cat("\nNo rolling-origin record: EXIT_MODEL = cat on the 'recent' basis has no rates at early dates.\n")
 
 ## ---------------------------------------------------------------------
 ## [26.4] Apply to the cohort: population probabilities and counts
@@ -388,17 +465,19 @@ for (hh in as.character(H_SET))
 cat("\nExpected exits by 2026Q2 category:\n")
 print(exits_by_origin, row.names = FALSE)
 
-## Side by side with the survivor-only forecast (counts_int from 27's
-## tally, or the soft counts from 23 if 27 has not run)
-surv <- if (exists("counts_int")) counts_int else
-  data.frame(cat = CAT_LABELS, now = pop_counts$now[1:N_CAT],
-             h4 = round(colSums(PROB[["4"]])), h12 = round(colSums(PROB[["12"]])),
-             h20 = round(colSums(PROB[["20"]])))
+## Side by side with the survivor-only forecast ON THE SAME BASIS: the
+## probability sums from 23, rounded to the cohort. (Until 2026-09-21b a
+## warm session took counts_int from 27 instead, which under ASSIGN_BASIS =
+## "median" is a tally of medians: the $10B row then read 55 against 41,
+## a difference of basis, not of mergers.) 27 rebuilds this table on the
+## assignment basis for the workbook.
+surv <- data.frame(cat = CAT_LABELS, now = pop_counts$now[1:N_CAT])
+for (hh in as.character(H_SET)) surv[[paste0("h", hh)]] <- lr_round(colSums(PROB[[hh]]), nrow(fc))
 compare_pop <- data.frame(
   cat = CAT_LABELS, now = surv$now,
   no_mergers_5y = surv$h20, with_mergers_5y = pop_counts$h20[1:N_CAT],
   difference = pop_counts$h20[1:N_CAT] - surv$h20)
-cat("\nFive years out, survivor-only vs population:\n")
+cat("\nFive years out, survivor-only vs population (both on the probability basis):\n")
 print(compare_pop, row.names = FALSE)
 
 ## ---------------------------------------------------------------------
@@ -441,20 +520,33 @@ print(exit_rates_applied %>% select(h, cat, n_inst, base_pct, uplift, rate_pct, 
 ## must equal the factor 26 measures itself at the cohort date (the same
 ## env_at() the backtest uses) and the one 30 saved. A gap means
 ## panel_exit_models.rds and this session are not from the same run.
-ENV_NOW_26 <- env_at(N_Q)
+ENV_NOW_26 <- setNames(lapply(H_SET, function(h) env_at(N_Q, h)), as.character(H_SET))
 if (EXIT_MODEL %in% c("cat_env", "cat_env2")) {
-  f26 <- if (EXIT_MODEL == "cat_env2") ENV_NOW_26$cat else rep(ENV_NOW_26$all, N_CAT)
-  f30 <- if (is.null(ENV_NOW_30)) rep(NA_real_, N_CAT) else
-         if (EXIT_MODEL == "cat_env2") ENV_NOW_30$factor_cat else rep(ENV_NOW_30$factor_all, N_CAT)
-  upl <- with(exit_rates_applied[exit_rates_applied$h == 20, ], ifelse(is.finite(base) & base > 0, rate / base, NA_real_))
-  cat(sprintf("\nEnvironment factor at %s, three ways (they should agree):\n", qgrid$q_label[N_Q]))
-  cat("  26 env_at()            :", paste(sprintf("%.2f", f26), collapse = " / "), "\n")
-  cat("  30 env_now (saved)     :", paste(sprintf("%.2f", f30), collapse = " / "), "\n")
-  cat("  applied / long-run, 5yr:", paste(sprintf("%.2f", upl), collapse = " / "), "\n")
-  gap <- max(abs(upl - f26), abs(f30 - f26), na.rm = TRUE)
+  env30 <- function(what, hh) {        # 30 saves these by horizon since 2026-09-25a; one set before that
+    x <- ENV_NOW_30[[what]]
+    if (is.null(x)) return(NULL)
+    if (what == "factor_cat") { if (is.list(x)) x[[hh]] else x } else { if (length(x) > 1) x[[hh]] else x }
+  }
+  gap <- 0
+  cat(sprintf("\nEnvironment factor at %s, three ways at each horizon (they should agree):\n", qgrid$q_label[N_Q]))
+  for (h in H_SET) {
+    hh  <- as.character(h)
+    f26 <- if (EXIT_MODEL == "cat_env2") ENV_NOW_26[[hh]]$cat else rep(ENV_NOW_26[[hh]]$all, N_CAT)
+    f30 <- if (EXIT_MODEL == "cat_env2") env30("factor_cat", hh) else rep(env30("factor_all", hh), N_CAT)
+    if (is.null(f30) || length(f30) != N_CAT) f30 <- rep(NA_real_, N_CAT)
+    upl <- with(exit_rates_applied[exit_rates_applied$h == h, ], ifelse(is.finite(base) & base > 0, rate / base, NA_real_))
+    cat(sprintf("  h = %2d (window %2d q)  26 env_at()        : %s\n", h, env_window(h), paste(sprintf("%.2f", f26), collapse = " / ")))
+    cat(sprintf("                         30 env_now (saved) : %s\n", paste(sprintf("%.2f", f30), collapse = " / ")))
+    cat(sprintf("                         applied / long-run : %s\n", paste(sprintf("%.2f", upl), collapse = " / ")))
+    gap <- max(gap, abs(upl - f26), abs(f30 - f26), na.rm = TRUE)
+  }
+  ## A gap is not a rounding matter (those are under 0.005): the probabilities
+  ## in panel_exit_models.rds were built under another window or on another
+  ## panel, so the counts would not be the model the config describes. Stop
+  ## before anything is saved for 27 to publish.
   if (is.finite(gap) && gap > 0.02)
-    warning("Environment factors disagree by ", round(gap, 3),
-            ": panel_exit_models.rds may not be from this panel. Re-run 30, then 26.")
+    stop("Environment factors disagree by ", round(gap, 3), " (table above): panel_exit_models.rds was not written ",
+         "by this panel under this EXIT_ENV_WINDOW_Q. Run 30 (31 first if the panel changed), then 26 again.")
 }
 
 ## ---------------------------------------------------------------------
@@ -498,7 +590,8 @@ saveRDS(list(exit_rates = exit_rates, exit_wide = exit_wide,
              EXIT_MODEL = EXIT_MODEL,
              exit_rates_applied = exit_rates_applied, BT_MODEL = BT_MODEL,
              BT_NOTE = BT_NOTE, N_UNSCORED = N_UNSCORED,
-             ENV_NOW_26 = ENV_NOW_26, P_EXIT_JOIN = fc$join_number,
+             ENV_NOW_26 = ENV_NOW_26, ENV_WINDOW = ENV_WINDOW, P_EXIT_JOIN = fc$join_number,
+             exit_roll = exit_roll, exit_roll_summ = exit_roll_summ, ROLL_N = ROLL_N,
              SCRIPT26_VERSION = SCRIPT26_VERSION,
              MIN_EXIT_POOL = MIN_EXIT_POOL),
         file = "panel_exit.rds")

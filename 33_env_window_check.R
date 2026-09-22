@@ -31,7 +31,8 @@
 ##   differ only in the factor:
 ##     none       no factor (EXIT_MODEL = "cat" on the full basis)
 ##     agg8       one system-wide factor, 8-quarter window   (cat_env)
-##     cat8       shrunk category factors, 8-quarter window  (cat_env2, PRODUCTION)
+##     prod       shrunk category factors, window from the config by horizon (PRODUCTION)
+##     cat8       shrunk category factors, 8-quarter window  (production until 21 Sep 2026)
 ##     cat12      the same, 12-quarter window
 ##     cat20      the same, 20-quarter window
 ##     cat8_half  cat8 applied at half strength: 1 + (f - 1) / 2
@@ -51,6 +52,14 @@
 ##   factor was measured. cat8 vs cat12 vs cat20, down each horizon, says
 ##   whether a longer memory is safer at longer horizons.
 ##
+## OUTCOME, 21 SEP 2026. Window length did not change accuracy (scores
+## within 2.2 points at every horizon) but it changed the tail and the
+## stability: worst five-year miss 1.48 (8q) / 1.35 (12q) / 1.26 (20q), and
+## the $100M-$500M factor moved ~0.16 a year on 8 quarters against ~0.06 on
+## 20. Production now matches the window to the horizon -- max(8, h), i.e.
+## 8 / 12 / 20 quarters -- set in the config as EXIT_ENV_WINDOW_Q. The row
+## 'prod' below is whatever the config says; cat8 is the old production.
+##
 ## NOTHING HERE CHANGES A PUBLISHED NUMBER. If a horizon-matched window
 ## wins by 30's own margin (3 points) without giving ground at one and
 ## three years, the change belongs in 30 (measure the factor at each
@@ -69,13 +78,40 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 
+## The config is loaded once per session (CONFIG_LOADED). If 00_config.R has
+## been edited or replaced since -- as it is whenever EXIT_MODEL or the
+## environment window changes -- re-load it, so this script cannot run on
+## the settings from before the edit. If copies in Data/ and the project
+## root DISAGREE nothing is re-loaded: which is current is not for a script
+## to guess. (Same block as in 26.)
+.cf <- c("00_config.R", "../00_config.R", "S:/Projects/Credit_Union_Growth_Forecast/00_config.R")
+.cf <- unique(normalizePath(.cf[file.exists(.cf)]))
+if (length(.cf) && exists("CFG")) {
+  .cfgs <- lapply(.cf, function(f) {
+    e <- new.env(); invisible(capture.output(sys.source(f, envir = e))); e$CFG })
+  if (length(.cf) > 1 && !all(vapply(.cfgs[-1], identical, NA, .cfgs[[1]]))) {
+    warning("Different 00_config.R files on the search path (", paste(.cf, collapse = "; "),
+            "). The settings already loaded were kept; remove the stale copy.")
+  } else {
+    .chg <- names(.cfgs[[1]])[!mapply(identical, .cfgs[[1]], CFG[names(.cfgs[[1]])])]
+    if (length(.chg)) {
+      cat("00_config.R has changed on disk since this session loaded it (",
+          paste(.chg, collapse = ", "), "): re-loading it.\n", sep = "")
+      source(.cf[1])
+    }
+    rm(.chg)
+  }
+  rm(.cfgs)
+}
+rm(.cf)
+
 library(dplyr)
 library(tidyr)
 
 ## ---------------------------------------------------------------------
 ## [33.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT33_VERSION <- "2026-09-21a"
+SCRIPT33_VERSION <- "2026-09-21b"
 cat("33_env_window_check.R version", SCRIPT33_VERSION, "\n")
 if (!exists("CAT_LABELS") || !exists("N_Q") || !exists("qgrid")) {   # 20's constants live in panel_prep.rds
   .pp <- readRDS("panel_prep.rds")
@@ -90,6 +126,12 @@ stopifnot(exists("feat"), exists("H_SET"), exists("N_CAT"), exists("N_Q"), exist
 ## [33.1] Settings
 ## ---------------------------------------------------------------------
 WINDOWS       <- c(8L, 12L, 20L)                         # factor windows tried, quarters
+ENV_WINDOW_Q  <- cfg_get("EXIT_ENV_WINDOW_Q", c("4" = 8L, "12" = 12L, "20" = 20L))   # production, by horizon
+env_window <- function(h) {
+  w <- ENV_WINDOW_Q
+  if (length(w) == 1L) return(as.integer(w))
+  as.integer(w[[as.character(h)]])
+}
 SHRINK_N      <- cfg_get("EXIT_ENV_SHRINK_N", 2000)      # as 26 and 30
 MIN_EXIT_POOL <- cfg_get("MIN_EXIT_POOL", 200L)
 N_ORIGINS     <- 32L                                     # 4 folds x 8 origins, as 30
@@ -169,6 +211,7 @@ for (h in H_SET) {
     s <- last_o - FOLD_WIDTH + 1L - FOLD_WIDTH * ((last_o - o) %/% FOLD_WIDTH)
     f <- list(none      = rep(1, N_CAT),
               agg8      = rep(env_at_w(o, 8L)$all, N_CAT),
+              prod      = env_at_w(o, env_window(h))$cat,
               cat8      = env_at_w(o, 8L)$cat,
               cat12     = env_at_w(o, 12L)$cat,
               cat20     = env_at_w(o, 20L)$cat,
@@ -187,7 +230,7 @@ for (h in H_SET) {
 }
 env_res <- bind_rows(rows)
 
-CAND_ORDER <- c("none", "agg8", "cat8", "cat12", "cat20", "cat8_half", "cat8_cv30")
+CAND_ORDER <- c("none", "agg8", "prod", "cat8", "cat12", "cat20", "cat8_half", "cat8_cv30")
 env_summ <- env_res %>% group_by(h, cand) %>%
   summarise(origins = n(),
             level = round(sum(pred) / sum(act), 2),              # 30's convention: predicted / actual
@@ -199,7 +242,8 @@ env_summ <- env_res %>% group_by(h, cand) %>%
             .groups = "drop") %>%
   mutate(score = round(cat_wape + 100 * abs(level - 1), 1)) %>%
   arrange(h, match(cand, CAND_ORDER))
-cat("\n=== Category-rate family, factor measured AT each origin (cat8 = production) ===\n",
+cat("\n=== Category-rate family, factor measured AT each origin (prod = the config's window by horizon:",
+    paste(sapply(H_SET, env_window), collapse = " / "), "quarters) ===\n",
     "level = predicted/actual pooled (1.00 perfect) | act_over_pred = the same, 26's way round\n",
     "worst / best / last = actual/predicted at single origins ('last' is what the With Mergers tab prints)\n",
     "score = cat_wape + level error, as in 30 -- lower is better\n\n")
@@ -209,13 +253,13 @@ for (h in H_SET) {
   cat("\n")
 }
 
-## Does the last origin reproduce 26's backtest? (it must, for cat8, if 26 ran under cat_env2)
+## Does the last origin reproduce 26's backtest? (it must, for prod, if 26 ran under cat_env2 with the same config)
 if (file.exists("panel_exit.rds")) {
   .ex <- readRDS("panel_exit.rds")
   if (identical(.ex$BT_MODEL, "cat_env2")) {
-    chk <- env_summ %>% filter(cand == "cat8") %>% select(h, here = last) %>%
+    chk <- env_summ %>% filter(cand == "prod") %>% select(h, here = last) %>%
       left_join(.ex$exit_bt_tot %>% select(h, script26 = ratio), by = "h")
-    cat("Most recent origin, cat8, against 26's backtest (should match):\n")
+    cat("Most recent origin, prod, against 26's backtest (should match):\n")
     print(as.data.frame(chk), row.names = FALSE)
   }
   rm(.ex)
@@ -241,7 +285,7 @@ fac_tbl <- bind_rows(lapply(which(grepl("Q2$", qgrid$q_label) & seq_len(N_Q) > 3
 cat("\nEnvironment factor for", CAT_LABELS[4], "by measurement date and window:\n")
 print(fac_tbl, row.names = FALSE)
 
-## What the cohort date would read under each window (production is w = 8)
+## What the cohort date would read under each window (production: EXIT_ENV_WINDOW_Q by horizon)
 cat("\nFactors at", qgrid$q_label[N_Q], "by window:\n")
 for (w in WINDOWS) cat(sprintf("  w = %2d : %s\n", w, paste(sprintf("%.2f", env_at_w(N_Q, w)$cat), collapse = " / ")))
 

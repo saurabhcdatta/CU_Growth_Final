@@ -44,7 +44,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 
-SCRIPT27_VERSION <- "2026-09-21a"
+SCRIPT27_VERSION <- "2026-09-21b"
 cat("27_export_excel.R version", SCRIPT27_VERSION, "\n")
 
 ## The helpers live in the project root, not in Data. Search a few likely
@@ -257,17 +257,34 @@ ensure_ctx()
 ## applied (EXIT_MODEL travels in panel_exit.rds) and is a function, not a
 ## constant, so a block re-run after 26 has been re-run cannot print the
 ## previous model's description.
+## The factor's window travels in panel_exit.rds as ENV_WINDOW (quarters, by
+## horizon). Since 21 Sep 2026 it is as long as the forecast reaches -- two
+## years for the one-year counts, three for the three-year, five for the
+## five-year -- and the words follow whatever 26 actually used.
+window_words <- function(short = FALSE) {
+  w <- if (exists("ENV_WINDOW", .GlobalEnv)) get("ENV_WINDOW", .GlobalEnv) else
+         setNames(rep(8L, length(H_SET)), as.character(H_SET))
+  num <- function(x) { nm <- c("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+                       if (x == round(x) && x >= 1 && x <= 10) nm[x] else format(x) }
+  if (length(unique(w)) == 1L) return(sprintf("the last %s years", num(w[[1]] / 4)))
+  if (short) return(sprintf("a window as long as the forecast reaches, %s to %s years", num(min(w) / 4), num(max(w) / 4)))
+  paste0("a window as long as the forecast reaches (",
+         paste(sprintf("the last %s years for the %s-year counts", sapply(w / 4, num), sapply(H_SET / 4, num)),
+               collapse = ", "), ")")
+}
 exit_words <- function() {
   m <- if (exists("EXIT_MODEL", .GlobalEnv)) get("EXIT_MODEL", .GlobalEnv) else "cat"
+  ww <- window_words()
   how <- switch(m,
     cat       = "the historical exit rate of its asset category",
-    cat_env   = "the long-run exit rate of its asset category, scaled by a system-wide merger-environment factor (the one-year exit rate of the last two years against its long-run average)",
-    cat_env2  = "the long-run exit rate of its asset category, scaled by that category's merger-environment factor (the category's one-year exit rate over the last two years against its own long-run average)",
+    cat_env   = sprintf("the long-run exit rate of its asset category, scaled by a system-wide merger-environment factor: the recent one-year exit rate against its long-run average, measured over %s", ww),
+    cat_env2  = sprintf("the long-run exit rate of its asset category, scaled by that category's merger-environment factor: the category's recent one-year exit rate against its own long-run average, measured over %s", ww),
     size      = "a long-run exit rate that falls smoothly with asset size",
-    size_env  = "a long-run exit rate that falls smoothly with asset size, scaled by a system-wide merger-environment factor (the one-year exit rate of the last two years against its long-run average)",
+    size_env  = sprintf("a long-run exit rate that falls smoothly with asset size, scaled by a system-wide merger-environment factor: the recent one-year exit rate against its long-run average, measured over %s", ww),
     size_env2 = "a long-run exit rate that falls smoothly with asset size, scaled by a merger-environment factor that itself varies with size",
     "an exit probability from the model selected in script 30")
-  list(model = m, how = how,
+  list(model = m, how = how, window = ww, window_short = window_words(short = TRUE),
+       matched = grepl("forecast reaches", ww, fixed = TRUE),
        adjusted = m %in% c("cat_env", "cat_env2", "size_env", "size_env2"))
 }
 
@@ -662,9 +679,10 @@ if (HAVE_EXIT) {
               if (exists("EXIT_BASIS") && identical(EXIT_BASIS, "recent") && exists("EXIT_RECENT_Q"))
                 sprintf("the last %d years of the record", as.integer(EXIT_RECENT_Q / 4)) else "the record since 2005")
     else if (ew$model == "cat_env2")
-      "Exit rates start from the long-run record -- the share of credit unions in each asset category, at any date since 2005, that merged away or closed within one, three and five years -- and are then scaled category by category for the current pace of mergers: the category's one-year exit rate over the last two years divided by its own long-run one-year rate, pulled toward the system-wide figure where a category has few institutions."
+      sprintf("Exit rates start from the long-run record -- the share of credit unions in each asset category, at any date since 2005, that merged away or closed within one, three and five years -- and are then scaled category by category for the current pace of mergers: the category's recent one-year exit rate divided by its own long-run one-year rate, pulled toward the system-wide figure where a category has few institutions. The recent rate is measured over %s%s.", ew$window,
+              if (ew$matched) ", so that a short-lived lull or surge in mergers is not projected years ahead" else "")
     else if (ew$model == "cat_env")
-      "Exit rates start from the long-run record -- the share of credit unions in each asset category, at any date since 2005, that merged away or closed within one, three and five years -- and are then scaled by one system-wide factor for the current pace of mergers: the one-year exit rate over the last two years divided by its long-run average."
+      sprintf("Exit rates start from the long-run record -- the share of credit unions in each asset category, at any date since 2005, that merged away or closed within one, three and five years -- and are then scaled by one system-wide factor for the current pace of mergers: the recent one-year exit rate divided by its long-run average, measured over %s.", ew$window)
     else
       sprintf("Each institution's chance of exiting is %s, estimated from the record of every credit union since 2005.", ew$how),
     upl_txt,
@@ -681,6 +699,47 @@ if (HAVE_EXIT) {
               Institutions = n, `Predicted exits` = predicted,
               `Actual exits` = actual, `Actual / predicted` = ratio)
 
+  ## THE RANGE, AND THE RECORD IT COMES FROM. 26 [26.3b] runs the rates as
+  ## applied from each of ~32 past dates per horizon and compares with what
+  ## happened. The 10th and 90th percentiles of actual / predicted, applied
+  ## to today's expected exits, give a band four past forecasts in five fell
+  ## inside. The record replaces the single-date backtest on the tab: one
+  ## date per horizon says little (from 2021Q2, inside the pandemic lull,
+  ## the five-year miss was the worst on record).
+  have_roll <- exists("exit_roll_summ") && !is.null(exit_roll_summ) &&
+               all(H_SET %in% exit_roll_summ$h)
+  range_tbl <- NULL; range_note <- NULL
+  if (have_roll) {
+    rs     <- as.data.frame(exit_roll_summ)[match(H_SET, exit_roll_summ$h), ]
+    n_all  <- nrow(inst_out)
+    ex_now <- sapply(H_SET, function(h) pc[[paste0("h", h)]][N_CAT + 1])
+    lo_ex  <- pmin(ex_now, round(ex_now * rs$p10)); hi_ex <- pmax(ex_now, round(ex_now * rs$p90))
+    range_tbl <- data.frame(
+      Horizon = unname(H_LAB), `Expected exits` = as.integer(ex_now),
+      `Exits, low` = as.integer(lo_ex), `Exits, high` = as.integer(hi_ex),
+      `Still operating, expected` = as.integer(n_all - ex_now),
+      `Still operating, low` = as.integer(n_all - hi_ex),
+      `Still operating, high` = as.integer(n_all - lo_ex),
+      check.names = FALSE, stringsAsFactors = FALSE)
+    record_tbl <- data.frame(
+      Horizon = unname(H_LAB), `Past forecast dates tested` = as.integer(rs$origins),
+      `First date` = rs$from, `Last date` = rs$to,
+      `Predicted / actual, all dates pooled` = round(rs$level, 2),
+      `Actual / predicted: lowest` = round(rs$lo, 2), `10th percentile` = round(rs$p10, 2),
+      `90th percentile` = round(rs$p90, 2), highest = round(rs$hi, 2),
+      `most recent date` = round(rs$last, 2),
+      check.names = FALSE, stringsAsFactors = FALSE)
+    i5    <- length(H_SET)
+    worst <- if (abs(log(rs$hi[i5])) >= abs(log(rs$lo[i5]))) rs$hi[i5] else rs$lo[i5]
+    range_note <- sprintf("RANGE. The exits on this tab are central estimates. The range table applies to them the spread seen when the same method was run from each of %d past dates per horizon (%s to %s for the %s-year horizon) and compared with what then happened: 'low' and 'high' are the 10th and 90th percentiles of actual / predicted, so four past forecasts in five fell inside the band. Pooled over all dates, predicted / actual was %s at the three horizons; single dates strayed further, and the largest miss at the longest horizon was the forecast dated %s, when exits ran %.0f%% %s the forecast. The past dates overlap heavily, so this is a record of what has happened, not a statistical confidence interval.",
+                          rs$origins[i5], rs$from[i5], rs$to[i5], format(H_SET[i5] / 4),
+                          paste(sprintf("%.2f", rs$level), collapse = " / "),
+                          rs$worst_date[i5], 100 * abs(worst - 1), if (worst >= 1) "above" else "below")
+  } else if (ew$adjusted) {
+    warning("No rolling-origin record in panel_exit.rds (26 older than 2026-09-21b): the With Mergers tab ",
+            "is written without a range. Re-run 26, then 27.")
+  }
+
   SH[[length(SH) + 1]] <- mk_sheet(
     "With Mergers", "Projected counts by asset category, allowing for mergers and liquidations",
     sprintf("All %s institutions at %s. Totals FALL as institutions leave.",
@@ -688,19 +747,29 @@ if (HAVE_EXIT) {
     notes = c(
       "The Total tab holds every institution in the system; this tab does not. Each institution's category is weighted by its chance of still operating at each date, and the remainder is counted as merged or closed. 'Still operating' is the number of today's credit unions expected to exist at each date.",
       exit_note,
+      range_note,
       "These are expected counts, rounded to whole numbers. Unlike the Total and regional tabs they cannot be reproduced by counting a list: no institution is identified as likely to merge, and no such column exists anywhere in this workbook. A category-level rate says nothing about any particular credit union.",
       "The regional tabs carry a matching block. Because each is rounded to its own cell, the eight blocks can differ from this table by one or two institutions in a category."),
-    blocks = list(
+    blocks = c(list(
       list(head = "Population counts by category (institutions still operating)",
-           df = pop_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT)),
+           df = pop_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT, S_INT))),
+      if (have_roll) list(
+      list(head = "How firm are the totals? Expected exits, and the range that past forecasts made the same way support",
+           df = range_tbl, styles = c(S_NORM, rep(S_INT, 6)))),
+      list(
       list(head = sprintf("Five years out: without and with mergers (%s)", H_LAB[3]),
            df = side_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT)),
       list(head = "Expected exits by category at the cohort date (how many of today's institutions in each category will be gone)",
            df = exit_tbl, styles = c(S_NORM, S_INT, S_INT, S_INT, S_INT)),
-      list(head = rate_head, df = rate_tbl, styles = rate_sty),
+      list(head = rate_head, df = rate_tbl, styles = rate_sty)),
+      if (have_roll) list(
+      list(head = paste0("The record: the same method run from past dates and compared with what happened",
+                         if (exists("BT_NOTE")) paste0(" -- tested: ", BT_NOTE) else ""),
+           df = record_tbl, styles = c(S_NORM, S_INT, S_NORM, S_NORM, rep(S_DEC, 6))))
+      else list(
       list(head = bt_head,
-           df = bt_tbl, styles = c(S_NORM, S_NORM, S_INT, S_DEC, S_INT, S_DEC))),
-    cols = col_widths(list(c(1, 1, 26), c(2, 7, 20))))
+           df = bt_tbl, styles = c(S_NORM, S_NORM, S_INT, S_DEC, S_INT, S_DEC)))),
+    cols = col_widths(list(c(1, 1, 26), c(2, 10, 20))))
 }
 
 ## ---------------------------------------------------------------------
@@ -1173,10 +1242,15 @@ if (HAVE_EXIT) {
     ## The rate quoted is the one the counts imply for TODAY's institutions,
     ## not a historical average, and the sentence says so.
     sprintf(paste(if (exit_words()$adjusted)
-                    "About %.1f%% of today's credit unions are expected to merge or close each year, mostly small ones: long-run exit rates by size, adjusted for how fast institutions of each size have been merging over the last two years."
+                    paste0("About %.1f%% of today's credit unions are expected to merge or close each year, mostly small ones: long-run exit rates by size, adjusted for how fast institutions of each size have been merging recently (measured over ", exit_words()$window_short, ").")
                   else
                     "At historical exit rates about %.1f%% of today's credit unions would merge or close each year, mostly small ones.",
-                  "On that basis %s of today's %s institutions are expected still to be operating in %s (%s exits), and the under-$10M category falls to %s rather than %s. See the With Mergers tab."),
+                  "On that basis %s of today's %s institutions are expected still to be operating in %s (%s exits), and the under-$10M category falls to %s rather than %s.",
+                  if (exists("range_tbl") && !is.null(range_tbl))
+                    sprintf("Past forecasts made the same way support a range of about %s to %s exits by then.",
+                            format(range_tbl$`Exits, low`[nrow(range_tbl)], big.mark = ","),
+                            format(range_tbl$`Exits, high`[nrow(range_tbl)], big.mark = ",")),
+                  "See the With Mergers tab."),
             100 * (1 - (1 - pop_counts$h20[N_CAT + 1] / nrow(inst_out))^(1/5)),
             format(nrow(inst_out) - pop_counts$h20[N_CAT + 1], big.mark = ","),
             format(nrow(inst_out), big.mark = ","), H_LAB[3],
@@ -1210,7 +1284,7 @@ tab_help <- list(
   c("Diagnostics", "Model-selection results and estimation detail, including the unrounded expected counts behind the whole numbers.", "Analysts only. Nothing here changes how the other tabs are read.", "The unrounded counts are fractions; do not quote them to the field.")
 )
 if (HAVE_EXIT) tab_help <- append(tab_help, list(
-  c("With Mergers", "The same forecast allowing for institutions that merge or close: expected counts by category at each date, how many of today's institutions are expected to be gone, the exit rates applied, and a backtest of those rates from past dates.", "Use this tab, not Total, when the question is how many credit unions there will be; 'Still operating' is the headline. The exits table is by TODAY's category -- 'how many of today's under-$10M credit unions will be gone' -- and each row is that category's count today times its applied rate in the rates table.", "These are expected values: no institution is identified as likely to merge, and the counts cannot be reproduced by filtering a list. The regional blocks are rounded separately and can differ from this tab by one or two.")),
+  c("With Mergers", "The same forecast allowing for institutions that merge or close: expected counts by category at each date, how many of today's institutions are expected to be gone, a range around those totals, the exit rates applied, and the record of the same method run from past dates.", "Use this tab, not Total, when the question is how many credit unions there will be; 'Still operating' is the headline. The exits table is by TODAY's category -- 'how many of today's under-$10M credit unions will be gone' -- and each row is that category's count today times its applied rate in the rates table.", "These are expected values: no institution is identified as likely to merge, and the counts cannot be reproduced by filtering a list. The range is the record of past misses, not a confidence interval. The regional blocks are rounded separately and can differ from this tab by one or two.")),
   after = 2)
 for (t in tab_help) {
   G[[length(G) + 1]] <- g_row("3. Tab by tab", paste(t[1], "- what it shows"), t[2])

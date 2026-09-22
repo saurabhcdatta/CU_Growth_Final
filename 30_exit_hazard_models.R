@@ -52,6 +52,33 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 
+## The config is loaded once per session (CONFIG_LOADED). If 00_config.R has
+## been edited or replaced since -- as it is whenever EXIT_MODEL or the
+## environment window changes -- re-load it, so this script cannot run on
+## the settings from before the edit. If copies in Data/ and the project
+## root DISAGREE nothing is re-loaded: which is current is not for a script
+## to guess. (Same block as in 26.)
+.cf <- c("00_config.R", "../00_config.R", "S:/Projects/Credit_Union_Growth_Forecast/00_config.R")
+.cf <- unique(normalizePath(.cf[file.exists(.cf)]))
+if (length(.cf) && exists("CFG")) {
+  .cfgs <- lapply(.cf, function(f) {
+    e <- new.env(); invisible(capture.output(sys.source(f, envir = e))); e$CFG })
+  if (length(.cf) > 1 && !all(vapply(.cfgs[-1], identical, NA, .cfgs[[1]]))) {
+    warning("Different 00_config.R files on the search path (", paste(.cf, collapse = "; "),
+            "). The settings already loaded were kept; remove the stale copy.")
+  } else {
+    .chg <- names(.cfgs[[1]])[!mapply(identical, .cfgs[[1]], CFG[names(.cfgs[[1]])])]
+    if (length(.chg)) {
+      cat("00_config.R has changed on disk since this session loaded it (",
+          paste(.chg, collapse = ", "), "): re-loading it.\n", sep = "")
+      source(.cf[1])
+    }
+    rm(.chg)
+  }
+  rm(.cfgs)
+}
+rm(.cf)
+
 library(dplyr)
 library(tidyr)
 library(haven)
@@ -60,7 +87,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-24c"
+SCRIPT30_VERSION <- "2026-09-25a"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("CAT_LABELS") || !exists("N_Q")) {   # 20's constants live in panel_prep.rds
   .pp <- readRDS("panel_prep.rds")
@@ -114,7 +141,24 @@ cat("Peer groups from 31:", if (HAVE_PEERS) "available" else "not available (run
 ## [30.1] Settings
 ## ---------------------------------------------------------------------
 EXIT_MODEL     <- cfg_get("EXIT_MODEL", "cat")      # what 26 will use; set after reading [30.6]
-ENV_WINDOW_Q   <- cfg_get("EXIT_ENV_WINDOW_Q", 8L)  # quarters for the merger-environment factor
+## Window of the merger-environment factor, BY HORIZON: the factor's memory
+## matches the forecast's reach -- max(8, h) quarters, so two years for the
+## one-year counts, three for the three-year, five for the five-year. 33's
+## rolling-origin test (21 Sep 2026): window length does not change
+## accuracy (scores within 2.2 points at every horizon), but with an
+## 8-quarter window held flat for five years the worst single-date miss
+## was 48% (from 2021Q2, the pandemic lull) against 26% with 20 quarters,
+## and the $100M-$500M factor moved ~0.16 a year against ~0.06. A single
+## number in the config still means "that window at every horizon".
+ENV_WINDOW_Q   <- cfg_get("EXIT_ENV_WINDOW_Q", c("4" = 8L, "12" = 12L, "20" = 20L))
+env_window <- function(h) {
+  w <- ENV_WINDOW_Q
+  if (length(w) == 1L) return(as.integer(w))
+  stopifnot(as.character(h) %in% names(w))
+  as.integer(w[[as.character(h)]])
+}
+cat("Environment-factor window by horizon (quarters):",
+    paste(sprintf("h=%d: %d", H_SET, sapply(H_SET, env_window)), collapse = " | "), "\n")
 MIN_EXIT_POOL  <- cfg_get("MIN_EXIT_POOL", 200L)
 
 ## Financial covariates. The panel from 20 carries assets only; these are
@@ -185,14 +229,15 @@ cat_rate <- function(train, test) {
 ## before the origin. A period effect, applied to every institution.
 ## Measured on ONE-YEAR exits (exit_h4), whatever the horizon being
 ## forecast, so the window is as close to the origin as the data allow:
-## origins in the ENV_WINDOW_Q quarters ending four quarters before the
+## origins in the env_window(h) quarters ending four quarters before the
 ## test origin, against the long-run one-year rate over all earlier
-## origins. Clamped to [0.5, 2]: it is an environment factor, not a
+## origins. The window depends on the horizon being forecast (see
+## [30.1]). Clamped to [0.5, 2]: it is an environment factor, not a
 ## forecast of its own.
-env_factor <- function(origin) {
+env_factor <- function(origin, h) {
   us  <- feat$usable_h4 & feat$q_index <= origin - 4L
   e1  <- feat$exit_h4[us]; q1 <- feat$q_index[us]
-  recent <- e1[q1 > origin - 4L - ENV_WINDOW_Q]
+  recent <- e1[q1 > origin - 4L - env_window(h)]
   if (length(recent) < 500 || length(e1) < 5000) return(1)
   min(max(mean(recent) / mean(e1), 0.5), 2)
 }
@@ -207,10 +252,10 @@ env_factor <- function(origin) {
 ## the origin, with a recent-window term whose effect bends with size.
 ## Smooth so a thin category (the $10B+ band has ~170 recent institution-
 ## quarters) borrows from its neighbours. Clamped to [0.5, 3].
-env_curve <- function(origin) {
+env_curve <- function(origin, h) {
   us <- feat$usable_h4 & feat$q_index <= origin - 4L
   d  <- data.frame(ex = feat$exit_h4[us], y = feat$y[us],
-                   recent = as.numeric(feat$q_index[us] > origin - 4L - ENV_WINDOW_Q))
+                   recent = as.numeric(feat$q_index[us] > origin - 4L - env_window(h)))
   if (sum(d$recent) < 500 || nrow(d) < 5000) return(function(y) rep(1, length(y)))
   m <- tryCatch(suppressWarnings(glm(ex ~ splines::ns(y, df = 5) + recent + recent:splines::ns(y, df = 3),
                                      data = d, family = binomial())), error = function(e) NULL)
@@ -229,10 +274,10 @@ env_curve <- function(origin) {
 ## weight of ENV_SHRINK_N institution-quarters so thin categories do not
 ## get a factor of 4 from 170 observations. Clamped to [0.5, 3].
 ENV_SHRINK_N <- cfg_get("EXIT_ENV_SHRINK_N", 2000)
-env_factor_cat <- function(origin) {
+env_factor_cat <- function(origin, h) {
   us <- feat$usable_h4 & feat$q_index <= origin - 4L
   e1 <- feat$exit_h4[us]; q1 <- feat$q_index[us]; k1 <- feat$cat_k[us]
-  rec <- q1 > origin - 4L - ENV_WINDOW_Q
+  rec <- q1 > origin - 4L - env_window(h)
   if (sum(rec) < 500 || length(e1) < 5000) return(rep(1, N_CAT))
   f_all <- mean(e1[rec]) / mean(e1)
   out <- rep(f_all, N_CAT)
@@ -246,12 +291,26 @@ env_factor_cat <- function(origin) {
   pmin(pmax(out, 0.5), 3)
 }
 
-m_cat      <- function(tr, te, h) cat_rate(tr, te)
-m_cat_env  <- function(tr, te, h) cat_rate(tr, te) * env_factor(min(te$q_index))
-m_cat_env2 <- function(tr, te, h) {
-  f <- env_factor_cat(min(te$q_index))
-  pmin(cat_rate(tr, te) * f[te$cat_k], 1)
+## The factor for every test row is measured at that row's OWN origin, as
+## production measures it at the cohort date. Until 2026-09-25a it was
+## measured once per fold, at the fold's first origin, and applied to all
+## eight origins: the pooled level came out the same (33: 1.01 either way
+## at five years) but the allocation error was flattered (11.1 vs 13.8)
+## and the factors production would really have used from 2020Q3-2021Q2
+## -- the pandemic lull -- were never applied.
+env_rows <- function(te, h) {
+  u <- sort(unique(te$q_index))
+  f <- vapply(u, function(o) env_factor(o, h), 0)
+  f[match(te$q_index, u)]
 }
+env_rows_cat <- function(te, h) {
+  u  <- sort(unique(te$q_index))
+  Fm <- vapply(u, function(o) env_factor_cat(o, h), numeric(N_CAT))   # N_CAT x origins
+  Fm[cbind(te$cat_k, match(te$q_index, u))]
+}
+m_cat      <- function(tr, te, h) cat_rate(tr, te)
+m_cat_env  <- function(tr, te, h) cat_rate(tr, te) * env_rows(te, h)
+m_cat_env2 <- function(tr, te, h) pmin(cat_rate(tr, te) * env_rows_cat(te, h), 1)
 
 ## region and cu_type are numeric codes from [30.0]; the logit must still
 ## treat them as categories, hence factor() in the formula.
@@ -486,10 +545,21 @@ m_size <- function(tr, te, h) {
   if (is.null(m)) return(rep(NA_real_, nrow(te)))
   predict(m, newdata = te, type = "response")
 }
-m_size_env <- function(tr, te, h) m_size(tr, te, h) * env_factor(min(te$q_index))
+m_size_env <- function(tr, te, h) m_size(tr, te, h) * env_rows(te, h)
+## size_env2's curve is measured at each test row's own origin too, like
+## every other factor: one small logit per origin (eight per fold). It adds
+## several minutes to the run, but leaving this candidate on the fold's
+## first origin -- the more flattering timing (see above) -- while the
+## others moved would tilt the scoreboard, and the verdict rule prefers an
+## asset-based model that comes within three points.
 m_size_env2 <- function(tr, te, h) {
-  ec <- env_curve(min(te$q_index))
-  pmin(m_size(tr, te, h) * ec(te$y), 1)
+  base <- m_size(tr, te, h)
+  f <- rep(NA_real_, nrow(te))
+  for (o in sort(unique(te$q_index))) {
+    ec <- env_curve(o, h); i <- te$q_index == o
+    f[i] <- ec(te$y[i])
+  }
+  pmin(base * f, 1)
 }
 
 ## Hybrid on the asset-based level: the size curve sets the level within
@@ -526,7 +596,7 @@ if (HAVE_PEERS) {
     list(p = as.numeric(r[pte]), fit = cf, ptr = ptr, pte = pte)
   }
   m_peer     <- function(tr, te, h) peer_rate(tr, te)$p
-  m_peer_env <- function(tr, te, h) peer_rate(tr, te)$p * env_factor(min(te$q_index))
+  m_peer_env <- function(tr, te, h) peer_rate(tr, te)$p * env_rows(te, h)
   m_logit_cl <- function(tr, te, h) {
     pr <- peer_rate(tr, te)
     af <- atyp_fit(tr)
@@ -704,12 +774,25 @@ cat("Expected five-year exits by model:",
 
 ## Environment at the cohort date, for 32's tables: the aggregate factor,
 ## the category factors, and the size curve evaluated on a grid of y.
-env_now <- list(factor_all = env_factor(N_Q), factor_cat = env_factor_cat(N_Q))
-.ec <- env_curve(N_Q); .yg <- seq(min(feat$y, na.rm = TRUE), max(feat$y, na.rm = TRUE), length.out = 200)
-env_now$curve <- data.frame(y = .yg, factor = .ec(.yg)); rm(.ec, .yg)
-cat(sprintf("\nEnvironment at %s: aggregate factor %.2f; by category: %s\n", qgrid$q_label[N_Q],
-            env_now$factor_all, paste(sprintf("%.2f", env_now$factor_cat), collapse = " / ")))
+## BY HORIZON since 2026-09-25a (the window differs by horizon): factor_all
+## is a vector and factor_cat / curve are lists, all named by horizon.
+.hs <- as.character(H_SET)
+.yg <- seq(min(feat$y, na.rm = TRUE), max(feat$y, na.rm = TRUE), length.out = 200)
+env_now <- list(
+  window     = setNames(sapply(H_SET, env_window), .hs),
+  factor_all = setNames(sapply(H_SET, function(h) env_factor(N_Q, h)), .hs),
+  factor_cat = setNames(lapply(H_SET, function(h) env_factor_cat(N_Q, h)), .hs),
+  curve      = setNames(lapply(H_SET, function(h) {
+    ec <- env_curve(N_Q, h); data.frame(y = .yg, factor = ec(.yg)) }), .hs))
+rm(.yg)
+cat(sprintf("\nEnvironment at %s, by horizon:\n", qgrid$q_label[N_Q]))
+for (.h in .hs)
+  cat(sprintf("  h = %2s (window %2d quarters): aggregate %.2f; by category: %s\n", .h,
+              env_now$window[[.h]], env_now$factor_all[[.h]],
+              paste(sprintf("%.2f", env_now$factor_cat[[.h]]), collapse = " / ")))
+rm(.h, .hs)
 saveRDS(list(cv_exit = cv_exit, summ = summ, verdict = best, env_now = env_now,
+             cohort_join = fc$join_number, N_Q = N_Q, SCRIPT30_VERSION = SCRIPT30_VERSION,
              P_EXIT_ALT = P_EXIT_ALT, CANDS = names(CANDS),
              FIN_VARS = FIN_VARS, TREE_PKG = TREE_PKG,
              ENV_WINDOW_Q = ENV_WINDOW_Q, rhs_base = rhs_base, rhs_fin = rhs_fin,

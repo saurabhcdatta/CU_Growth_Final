@@ -57,10 +57,20 @@ CFG <- list(
   EXIT_RECENT_Q = 60L,      # 15 years of origins
   MIN_EXIT_POOL = 200L,     # thin category borrows the rate from the one below
   EXIT_MODEL    = "cat_env2", # verdict of 30 [30.6], 21 Sep 2026: level 1.01, allocation 10.8% (5yr CV) # "cat" | "cat_env" | "size" | "size_env" | "logit" | "cat_logit" | "size_logit" | "peer" | "peer_env" | "logit_cl" | "logit_fin" | "tree" -- decided by 30 [30.6]
-  EXIT_ENV_WINDOW_Q = 8L,   # merger-environment window (quarters) for the *_env models
+  ## Merger-environment window in quarters, BY HORIZON: the factor's memory matches the
+  ## forecast's reach, max(8, h) -- decided 21 Sep 2026 on 33's rolling-origin test (same
+  ## accuracy as 8 quarters everywhere; worst five-year miss 26% instead of 48%; five-year
+  ## counts ~2.5x steadier between refreshes). A single number = that window at every horizon.
+  EXIT_ENV_WINDOW_Q = c("4" = 8L, "12" = 12L, "20" = 20L),
   EXIT_ENV_SHRINK_N = 2000, # cat_env2: prior weight (institution-quarters) pulling a category's factor toward the aggregate; same value 26 and 30 default to
   FIN_VARS      = NULL,
   PUBLISH_WATCHLIST = FALSE,  # 32: named consolidation-risk list -- leave FALSE unless leadership approves
+  ## 32, "Long-run, normal years": the abnormal periods left out, as quarter ranges. Rule decided
+  ## 21 Sep 2026: each NBER recession plus the four quarters after it (a merger completes 6-12
+  ## months after the trouble that starts it). Dates come from outside sources, never from looking
+  ## at the merger series. The 2022-23 rate shock stays IN: not a recession, and arguably still
+  ## today's environment. 32 prints a sensitivity table against three other ways of drawing them.
+  EXIT_NORMAL_EXCLUDE = list(recession_2008 = c("2007Q4", "2010Q2"), pandemic = c("2020Q1", "2021Q2")),
   CL_K          = 8L,       # peer groups in 31; see the elbow table [31.3]
   CL_VARS       = c("y", "g12", "g20", "vol", "hist_len", "acq_cum"),     # e.g. c(nw_ratio = "networth_ratio", roa = "roa", members = "members"); see 30 [30.2]
 
