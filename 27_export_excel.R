@@ -44,7 +44,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 
-SCRIPT27_VERSION <- "2026-09-21c"
+SCRIPT27_VERSION <- "2026-09-21d"
 cat("27_export_excel.R version", SCRIPT27_VERSION, "\n")
 
 ## The helpers live in the project root, not in Data. Search a few likely
@@ -69,6 +69,16 @@ find_src("0_xlsx_helpers.R")
 ## resolvable by name. 0_xlsx_helpers.R itself is untouched, so scripts
 ## 14 and 16 keep their original behaviour.
 find_src("0b_zip_base.R")
+
+## The writer must carry the 22 Sep pane fix (Excel opened the workbook as
+## "Repaired" without it). A warm session keeps the OLD xlsx_write() unless
+## the files are re-sourced, so check the function in the session, re-source
+## if it is the old one, and say so if the files on disk are old too.
+writer_ok <- function() exists("xlsx_write") && grepl("topRight", paste(deparse(xlsx_write), collapse = ""), fixed = TRUE)
+if (!writer_ok())
+  warning("0_xlsx_helpers.R / 0b_zip_base.R on disk are the versions from before 22 Sep 2026 (no pane fix): ",
+          "replace them at the project root, then run 27 -> 29 -> 32 or restart R.")
+cat("xlsx writer:", if (writer_ok()) "22 Sep pane fix present" else "OLD", "\n")
 stopifnot(exists("zip_base"))
 
 ## Load whatever the session is missing. Each file is loaded only if one of

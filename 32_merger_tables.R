@@ -93,7 +93,7 @@ if (exists("CFG"))
       "| EXIT_MODEL =", CFG$EXIT_MODEL, "| EXIT_ENV_WINDOW_Q =", paste(CFG$EXIT_ENV_WINDOW_Q, collapse = " / "), "\n")
 rm(.cf)
 library(dplyr); library(tidyr); library(splines)
-SCRIPT32_VERSION <- "2026-09-25j"
+SCRIPT32_VERSION <- "2026-09-25k"
 cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -436,14 +436,14 @@ H3[[sprintf("As happened: institutions, %s", cohort_lab)]]         <- H$today
 H3[["As happened: change"]]                                        <- H$today - H$start
 H3[[sprintf("As forecast: institutions, %s", cohort_lab)]]         <- H$today
 H3[[sprintf("As forecast: expected to merge or close by %s", H_LAB_DATE["20"])]] <- exp_exits
-H3[["As forecast: share (%)"]]                                     <- round(100 * exp_exits / pmax(H$today, 1), 1)
+H3[["As forecast: share (%)"]]                                     <- T1b[["Current, 5 yrs ahead (%)"]][seq_len(N_CAT)]   # the applied rate, as on the rate table below
 if (!is.null(fc_5y)) {
   H3[[sprintf("As forecast: institutions, %s (with mergers)", H_LAB_DATE["20"])]] <- fc_5y
   H3[["As forecast: change"]]                                      <- fc_5y - H$today
 }
 H3 <- add_total(H3, c(sum(H$start), sum(H$exits), round(100 * sum(H$exits) / sum(H$start), 1),
                       sum(H$today), sum(H$today) - sum(H$start), sum(H$today), sum(exp_exits),
-                      round(100 * sum(exp_exits) / sum(H$today), 1),
+                      T1b[["Current, 5 yrs ahead (%)"]][N_CAT + 1L],
                       if (!is.null(fc_5y)) c(sum(fc_5y), sum(fc_5y) - sum(H$today))))
 cat("\nH3 -- then and now:\n"); print(H3, row.names = FALSE)
 cat("\nH2 -- why each category changed:\n"); print(H2, row.names = FALSE)
@@ -848,6 +848,17 @@ find_src <- function(fn) {
 }
 if (!exists("xl_block")) find_src("0_xlsx_helpers.R")
 if (!exists("zip_base")) find_src("0b_zip_base.R")      # must follow the helpers
+
+## The writer must carry the 22 Sep pane fix (Excel opened the workbook as
+## "Repaired" without it). A warm session keeps the OLD xlsx_write() unless
+## the files are re-sourced, so check the function in the session, re-source
+## if it is the old one, and say so if the files on disk are old too.
+writer_ok <- function() exists("xlsx_write") && grepl("topRight", paste(deparse(xlsx_write), collapse = ""), fixed = TRUE)
+if (!writer_ok()) { find_src("0_xlsx_helpers.R"); find_src("0b_zip_base.R") }
+if (!writer_ok())
+  warning("0_xlsx_helpers.R / 0b_zip_base.R on disk are the versions from before 22 Sep 2026 (no pane fix): ",
+          "replace them at the project root, then run 27 -> 29 -> 32 or restart R.")
+cat("xlsx writer:", if (writer_ok()) "22 Sep pane fix present" else "OLD", "\n")
 
 sheet32 <- function(name, title, subtitle = NULL, notes = NULL, blocks = list(),
                     cols = NULL, freeze = NULL) {
