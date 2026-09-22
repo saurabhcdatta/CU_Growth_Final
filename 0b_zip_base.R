@@ -216,13 +216,25 @@ xlsx_write <- function(SH, out_path) {
   for (k in seq_along(SH)) {
     s <- SH[[k]]
 
+    ## Frozen panes, written the way Excel writes them (22 Sep 2026): a split
+    ## of 0 is left out, and the active pane follows the split -- bottomRight
+    ## for rows and columns, bottomLeft for rows only, topRight for columns
+    ## only. Until then every freeze was written as bottomRight with both
+    ## splits, and a columns-only freeze (ySplit="0", activePane="bottomRight")
+    ## made Excel open 32's workbook as "Repaired". (Same change in
+    ## 0_xlsx_helpers.R; this file's xlsx_write() is the one in use.)
     pane <- ""
     if (!is.null(s$freeze)) {
-      tl <- paste0(xl_col(s$freeze$x + 1), s$freeze$y + 1)
-      pane <- sprintf(paste0('<pane xSplit="%d" ySplit="%d" topLeftCell="%s" ',
-                             'activePane="bottomRight" state="frozen"/>',
-                             '<selection pane="bottomRight" activeCell="%s" sqref="%s"/>'),
-                      s$freeze$x, s$freeze$y, tl, tl, tl)
+      fx <- as.integer(s$freeze$x); fy <- as.integer(s$freeze$y)
+      if (fx > 0 || fy > 0) {
+        tl <- paste0(xl_col(fx + 1), fy + 1)
+        ap <- if (fx > 0 && fy > 0) "bottomRight" else if (fx > 0) "topRight" else "bottomLeft"
+        pane <- paste0('<pane',
+                       if (fx > 0) sprintf(' xSplit="%d"', fx) else "",
+                       if (fy > 0) sprintf(' ySplit="%d"', fy) else "",
+                       sprintf(' topLeftCell="%s" activePane="%s" state="frozen"/>', tl, ap),
+                       sprintf('<selection pane="%s" activeCell="%s" sqref="%s"/>', ap, tl, tl))
+      }
     }
 
     drawing_tag <- ""
