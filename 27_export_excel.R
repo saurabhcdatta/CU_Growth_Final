@@ -44,7 +44,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 
-SCRIPT27_VERSION <- "2026-09-21b"
+SCRIPT27_VERSION <- "2026-09-21c"
 cat("27_export_excel.R version", SCRIPT27_VERSION, "\n")
 
 ## The helpers live in the project root, not in Data. Search a few likely
@@ -619,6 +619,12 @@ if (HAVE_EXIT) {
     pop_tbl[[H_LAB[i]]] <- c(pc[[hh]][1:N_CAT], pc[[hh]][N_CAT + 1], sum(pc[[hh]][1:N_CAT]))
   }
   pop_tbl$Change <- pop_tbl[[H_LAB[3]]] - pop_tbl$Today
+  ## The tab's counts, for 32's "then and now" table: the same basis as this
+  ## workbook (26's own pop_counts are on the probability basis and can
+  ## differ by category from what this tab prints).
+  saveRDS(list(pc = pc, pop_tbl = pop_tbl, basis = ASSIGN_BASIS, EXIT_MODEL = EXIT_MODEL,
+               cohort_lab = qgrid$q_label[N_Q], n_cohort = nrow(inst_out), SCRIPT27_VERSION = SCRIPT27_VERSION),
+          file = "panel_with_mergers.rds")
 
   side_tbl <- compare_pop %>%
     transmute(Category = CAT_PRETTY[cat], Today = now,

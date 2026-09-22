@@ -93,7 +93,7 @@ if (exists("CFG"))
       "| EXIT_MODEL =", CFG$EXIT_MODEL, "| EXIT_ENV_WINDOW_Q =", paste(CFG$EXIT_ENV_WINDOW_Q, collapse = " / "), "\n")
 rm(.cf)
 library(dplyr); library(tidyr); library(splines)
-SCRIPT32_VERSION <- "2026-09-25g"
+SCRIPT32_VERSION <- "2026-09-25j"
 cat("32_merger_tables.R version", SCRIPT32_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -166,6 +166,16 @@ env_window <- function(h) {
 }
 RAW_WINDOW_Q      <- 8L      # the descriptive "last two years" comparison on the History tab
 H_LAB <- setNames(c("1yr", "3yr", "5yr"), as.character(H_SET))
+## Column labels for the rate tables say which way the horizon points: "5 yrs
+## ahead" is the share expected to merge or close within the NEXT five years
+## (to 2031Q2), never the five years just gone -- the field read "Current 5yr"
+## as "the last five years" (22 Sep 2026). The last one to five years enter
+## only through the current factor's window.
+AHEAD <- setNames(c("1 yr ahead", "3 yrs ahead", "5 yrs ahead"), as.character(H_SET))
+## The dates those horizons reach (2027Q2 / 2029Q2 / 2031Q2), as in the growth workbook.
+H_LAB_DATE <- setNames(vapply(H_SET, function(h) {
+  y <- START_YEAR + (N_Q + h - 1L) %/% 4L; q <- (N_Q + h - 1L) %% 4L + 1L; sprintf("%dQ%d", y, q) }, ""),
+  as.character(H_SET))
 cohort_lab <- qgrid$q_label[N_Q]
 
 ## ---------------------------------------------------------------------
@@ -229,12 +239,13 @@ for (h in H_SET) {
   us <- feat[[paste0("usable_h", h)]]
   d  <- feat[us, ]; d$ex <- d[[paste0("exit_h", h)]]
   m  <- glm(ex ~ ns(y, df = 5), data = d, family = binomial())
+  if (h == max(H_SET)) m_size_5y <- m                      # kept for the realised-by-size table in [32.1c]
   p  <- predict(m, newdata = data.frame(y = y_scale(grid_usd)), type = "response")
-  T1[[paste0("Long-run ", H_LAB[as.character(h)], " (%)")]] <- round(100 * p, 1)
-  T1[[paste0("Current ", H_LAB[as.character(h)], " (%)")]]  <-
+  T1[[paste0("Long-run, ", AHEAD[as.character(h)], " (%)")]] <- round(100 * p, 1)
+  T1[[paste0("Current, ", AHEAD[as.character(h)], " (%)")]]  <-
     round(100 * pmin(p * env_fn(y_scale(grid_usd), grid_cat, h), 1), 1)
 }
-T1[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1[["Current 5yr (%)"]] / 100)^(1/5)), 2)
+T1[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1[["Current, 5 yrs ahead (%)"]] / 100)^(1/5)), 2)
 cat("\nT1 -- merger rate by asset size (share exiting within the horizon):\n")
 print(T1, row.names = FALSE)
 
@@ -281,17 +292,17 @@ for (h in H_SET) {
   cu <- tapply(P5[[as.character(h)]], fc_k, mean, na.rm = TRUE)
   if (!exists("RATE_KEEP")) RATE_KEEP <- list()
   RATE_KEEP[[as.character(h)]] <- list(long_run = as.numeric(lr), current = as.numeric(cu))   # unrounded, for [32.2b]
-  T1b[[paste0("Long-run ", H_LAB[as.character(h)], " (%)")]] <- round(100 * as.numeric(lr), 1)
-  T1b[[paste0("Current ", H_LAB[as.character(h)], " (%)")]]  <- round(100 * as.numeric(cu), 1)
+  T1b[[paste0("Long-run, ", AHEAD[as.character(h)], " (%)")]] <- round(100 * as.numeric(lr), 1)
+  T1b[[paste0("Current, ", AHEAD[as.character(h)], " (%)")]]  <- round(100 * as.numeric(cu), 1)
 }
-T1b[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1b[["Current 5yr (%)"]] / 100)^(1/5)), 2)
+T1b[["Current, per year (%)"]] <- round(100 * (1 - (1 - T1b[["Current, 5 yrs ahead (%)"]] / 100)^(1/5)), 2)
 for (h in H_SET)                       # the factor applied in each category, horizon by horizon
-  T1b[[paste0("Factor ", H_LAB[as.character(h)])]] <-
+  T1b[[paste0("Factor, ", AHEAD[as.character(h)])]] <-
     round(as.numeric(tapply(env_fn(fc_now$y, fc_now$cat_k, h),
                             factor(fc_now$cat_k, levels = seq_len(N_CAT)), mean)), 2)
 ## Institutions still operating after five years (whatever their size by
 ## then), from today's count and each five-year rate.
-T1b[["Still operating in 5 yrs (long-run)"]] <- round(T1b$Institutions * (1 - T1b[["Long-run 5yr (%)"]] / 100))
+T1b[["Still operating in 5 yrs (long-run)"]] <- round(T1b$Institutions * (1 - T1b[["Long-run, 5 yrs ahead (%)"]] / 100))
 ## 'current': today's count less the expected exits from that category,
 ## the exits rounded to whole institutions so they add to the total (the
 ## same largest-remainder rule 27 uses for its exits-by-category block).
@@ -312,12 +323,152 @@ if (!CAT_FAMILY) {
 tot <- T1b[1, ]; tot[] <- NA; tot$Category <- "All institutions"
 tot$Institutions <- sum(T1b$Institutions)
 for (v in c("Still operating in 5 yrs (long-run)", "Still operating in 5 yrs (current)")) tot[[v]] <- sum(T1b[[v]])
-tot[["Long-run 5yr (%)"]] <- round(100 * (1 - tot[["Still operating in 5 yrs (long-run)"]] / tot$Institutions), 1)
-tot[["Current 5yr (%)"]]  <- round(100 * (1 - tot[["Still operating in 5 yrs (current)"]]  / tot$Institutions), 1)
-tot[["Current, per year (%)"]] <- round(100 * (1 - (1 - tot[["Current 5yr (%)"]] / 100)^(1/5)), 2)
+tot[["Long-run, 5 yrs ahead (%)"]] <- round(100 * (1 - tot[["Still operating in 5 yrs (long-run)"]] / tot$Institutions), 1)
+tot[["Current, 5 yrs ahead (%)"]]  <- round(100 * (1 - tot[["Still operating in 5 yrs (current)"]]  / tot$Institutions), 1)
+tot[["Current, per year (%)"]] <- round(100 * (1 - (1 - tot[["Current, 5 yrs ahead (%)"]] / 100)^(1/5)), 2)
 T1b <- rbind(T1b, tot)
 cat("\nT1b -- merger rate by asset category:\n")
 print(T1b, row.names = FALSE)
+
+## ---------------------------------------------------------------------
+## [32.1c] H -- the last five years as they happened, beside the next five
+##         as forecast
+## ---------------------------------------------------------------------
+## Asked for by the field (22 Sep 2026): the With Mergers view for the five
+## years that have already happened. The credit unions active five years
+## ago, what became of them by the cohort date, how each size class
+## changed and why -- next to what the forecast says for the five years
+## ahead. Universe: every institution in the panel at the start date.
+## Outcome: merged or closed (exit_q inside the five years), still
+## operating (in the panel at the cohort date, with its category then) or
+## left the panel for another reason (data filters, not mergers; rare).
+## Today's institutions absent five years ago are new charters and other
+## entrants.
+o_hist   <- N_Q - 20L
+hist_lab <- qgrid$q_label[o_hist]
+h0 <- panel %>% filter(q_index == o_hist) %>% select(join_number, cat_k, exit_q, assets_tot)
+h1 <- panel %>% filter(q_index == N_Q)   %>% select(join_number, cat_now = cat_k)
+h0 <- h0 %>% left_join(h1, by = "join_number") %>%
+  mutate(status = ifelse(!is.na(exit_q) & exit_q <= N_Q, "exit", ifelse(!is.na(cat_now), "survivor", "other")),
+         move   = ifelse(status != "survivor", NA_character_,
+                         ifelse(cat_now == cat_k, "same", ifelse(cat_now > cat_k, "up", "down"))))
+surv <- h0 %>% filter(status == "survivor")
+surv$in_fc <- surv$join_number %in% fc$join_number
+entrants <- fc %>% filter(!(join_number %in% h0$join_number))
+fk  <- function(x) factor(x, levels = seq_len(N_CAT))
+cnt <- function(x) as.integer(table(fk(x)))
+add_total <- function(df, vals) {                          # an "All institutions" row, keeping the column types
+  stopifnot(length(vals) == ncol(df) - 1L)
+  df[nrow(df) + 1L, ] <- c(list("All institutions"), as.list(as.numeric(vals)))
+  df
+}
+H <- data.frame(Category = CAT_PRETTY[CAT_LABELS], stringsAsFactors = FALSE, check.names = FALSE)
+H$start        <- cnt(h0$cat_k)
+H$exits        <- cnt(h0$cat_k[h0$status == "exit"])
+H$other        <- cnt(h0$cat_k[h0$status == "other"])
+H$same         <- cnt(surv$cat_k[surv$move == "same"])
+H$out_up       <- cnt(surv$cat_k[surv$move == "up"])      # grew out of the category
+H$out_down     <- cnt(surv$cat_k[surv$move == "down"])    # shrank out of it
+H$in_from_below <- cnt(surv$cat_now[surv$move == "up"])   # arrived from a smaller category
+H$in_from_above <- cnt(surv$cat_now[surv$move == "down"]) # arrived from a larger category
+H$surv_gone    <- cnt(surv$cat_now[!surv$in_fc])          # still operating but outside today's cohort (should be 0)
+H$entrants     <- cnt(entrants$cat_k)
+H$today        <- T1b$Institutions[seq_len(N_CAT)]
+.chk <- H$start - H$exits - H$other - H$out_up - H$out_down + H$in_from_below + H$in_from_above - H$surv_gone + H$entrants
+if (!identical(as.integer(.chk), as.integer(H$today)))
+  warning("[32.1c] the change in each category does not add up: ", paste(.chk - H$today, collapse = " / "),
+          " (today's cohort is not the panel at ", cohort_lab, ")")
+cat(sprintf("\nH -- %s to %s: %d institutions at the start; %d merged or closed, %d still operating (%d outside today's cohort), %d left the panel for other reasons; %d new since.\n",
+            hist_lab, cohort_lab, nrow(h0), sum(h0$status == "exit"), nrow(surv), sum(!surv$in_fc),
+            sum(h0$status == "other"), nrow(entrants)))
+
+## H1: what became of the institutions in each category
+H1 <- data.frame(`Category at start` = H$Category, check.names = FALSE, stringsAsFactors = FALSE)
+H1[[sprintf("Institutions, %s", hist_lab)]]         <- H$start
+H1[[sprintf("Merged or closed by %s", cohort_lab)]] <- H$exits
+H1[["Share merged or closed (%)"]]                  <- round(100 * H$exits / pmax(H$start, 1), 1)
+H1[["Still operating: same category"]]              <- H$same
+H1[["Still operating: grew into a larger category"]]   <- H$out_up
+H1[["Still operating: shrank into a smaller category"]] <- H$out_down
+if (sum(H$other) > 0) H1[["Left the panel for another reason"]] <- H$other
+H1 <- add_total(H1, c(sum(H$start), sum(H$exits), round(100 * sum(H$exits) / sum(H$start), 1),
+                      sum(H$same), sum(H$out_up), sum(H$out_down), if (sum(H$other) > 0) sum(H$other)))
+
+## H2: why each category's count changed
+H2 <- data.frame(Category = H$Category, check.names = FALSE, stringsAsFactors = FALSE)
+H2[[sprintf("Institutions, %s", hist_lab)]]      <- H$start
+H2[["Merged or closed (-)"]]                     <- -H$exits
+H2[["Grew into a larger category (-)"]]          <- -H$out_up
+H2[["Shrank into a smaller category (-)"]]       <- -H$out_down
+H2[["Arrived from a smaller category (+)"]]      <- H$in_from_below
+H2[["Arrived from a larger category (+)"]]       <- H$in_from_above
+H2[[sprintf("New since %s (+)", hist_lab)]]      <- H$entrants
+if (sum(H$other) > 0)     H2[["Left the panel for another reason (-)"]] <- -H$other
+if (sum(H$surv_gone) > 0) H2[["Still operating but outside today's cohort (-)"]] <- -H$surv_gone
+H2[[sprintf("Institutions, %s", cohort_lab)]]    <- H$today
+H2[["Change"]]                                   <- H$today - H$start
+H2 <- add_total(H2, colSums(H2[, -1]))
+
+## H3: then and now -- the five years just gone beside the five ahead
+fc_5y <- NULL; fc_5y_src <- NULL
+if (file.exists("panel_with_mergers.rds")) {
+  .wm <- readRDS("panel_with_mergers.rds")
+  if (identical(.wm$cohort_lab, cohort_lab) && !is.null(.wm$pc$h20)) {
+    fc_5y <- as.integer(.wm$pc$h20[seq_len(N_CAT)])
+    fc_5y_src <- sprintf("the growth workbook's With Mergers tab, %s basis", .wm$basis)
+  }
+  rm(.wm)
+}
+if (is.null(fc_5y) && file.exists("panel_exit.rds")) {
+  .ex <- readRDS("panel_exit.rds")
+  if (!is.null(.ex$pop_counts$h20) && identical(.ex$EXIT_MODEL, EXIT_MODEL)) {
+    fc_5y <- as.integer(.ex$pop_counts$h20[seq_len(N_CAT)])
+    fc_5y_src <- "26's population counts (probability basis; the With Mergers tab can differ by a few per category)"
+  }
+  rm(.ex)
+}
+exp_exits <- as.integer(H$today - T1b[["Still operating in 5 yrs (current)"]][seq_len(N_CAT)])
+H3 <- data.frame(Category = H$Category, check.names = FALSE, stringsAsFactors = FALSE)
+H3[[sprintf("As happened: institutions, %s", hist_lab)]]           <- H$start
+H3[[sprintf("As happened: merged or closed by %s", cohort_lab)]]   <- H$exits
+H3[["As happened: share (%)"]]                                     <- round(100 * H$exits / pmax(H$start, 1), 1)
+H3[[sprintf("As happened: institutions, %s", cohort_lab)]]         <- H$today
+H3[["As happened: change"]]                                        <- H$today - H$start
+H3[[sprintf("As forecast: institutions, %s", cohort_lab)]]         <- H$today
+H3[[sprintf("As forecast: expected to merge or close by %s", H_LAB_DATE["20"])]] <- exp_exits
+H3[["As forecast: share (%)"]]                                     <- round(100 * exp_exits / pmax(H$today, 1), 1)
+if (!is.null(fc_5y)) {
+  H3[[sprintf("As forecast: institutions, %s (with mergers)", H_LAB_DATE["20"])]] <- fc_5y
+  H3[["As forecast: change"]]                                      <- fc_5y - H$today
+}
+H3 <- add_total(H3, c(sum(H$start), sum(H$exits), round(100 * sum(H$exits) / sum(H$start), 1),
+                      sum(H$today), sum(H$today) - sum(H$start), sum(H$today), sum(exp_exits),
+                      round(100 * sum(exp_exits) / sum(H$today), 1),
+                      if (!is.null(fc_5y)) c(sum(fc_5y), sum(fc_5y) - sum(H$today))))
+cat("\nH3 -- then and now:\n"); print(H3, row.names = FALSE)
+cat("\nH2 -- why each category changed:\n"); print(H2, row.names = FALSE)
+
+## H4: by asset size at the start date -- the realised five-year share, with
+## the long-run and current curves at the same sizes
+.fmt <- function(a) paste0("$", format(a / 1e6, big.mark = ",", trim = TRUE), "M")
+.edges <- c(0, grid_usd, Inf)
+.lab <- c(paste("under", .fmt(grid_usd[1])),
+          paste(.fmt(grid_usd[-length(grid_usd)]), "to", .fmt(grid_usd[-1])),
+          paste(.fmt(grid_usd[length(grid_usd)]), "and over"))
+.mid <- c(grid_usd[1], sqrt(grid_usd[-length(grid_usd)] * grid_usd[-1]), grid_usd[length(grid_usd)])
+.bin <- cut(h0$assets_tot / ASSET_SCALE, breaks = .edges, labels = FALSE, right = FALSE)
+H4 <- data.frame(`Assets at start` = .lab, check.names = FALSE, stringsAsFactors = FALSE)
+H4[[sprintf("Institutions, %s", hist_lab)]]         <- as.integer(table(factor(.bin, levels = seq_along(.lab))))
+H4[[sprintf("Merged or closed by %s", cohort_lab)]] <- as.integer(table(factor(.bin[h0$status == "exit"], levels = seq_along(.lab))))
+H4[["Share (%)"]] <- round(100 * H4[[3]] / pmax(H4[[2]], 1), 1)
+if (exists("m_size_5y")) {
+  .p <- predict(m_size_5y, newdata = data.frame(y = y_scale(.mid)), type = "response")
+  .k <- pmin(pmax(findInterval(.mid / ASSET_SCALE, BREAKS[-1]) + 1L, 1L), N_CAT)
+  H4[["Long-run curve at this size, 5 yrs ahead (%)"]] <- round(100 * .p, 1)
+  H4[["Current curve at this size, 5 yrs ahead (%)"]]  <- round(100 * pmin(.p * env_fn(y_scale(.mid), .k, max(H_SET)), 1), 1)
+}
+rm(.fmt, .edges, .lab, .mid, .bin, .chk)
+cat("\nH4 -- realised five-year share by asset size at", hist_lab, ":\n"); print(H4, row.names = FALSE)
 
 ## ---------------------------------------------------------------------
 ## [32.2] T2 -- the historical record and the environment factor
@@ -500,9 +651,9 @@ T7b <- data.frame(Category = c(CAT_PRETTY[CAT_LABELS], "Total"),
                   `Institutions today` = c(n_today, sum(n_today)), check.names = FALSE, stringsAsFactors = FALSE)
 for (nm in names(FIVE)) {
   r <- FIVE[[nm]]
-  T7[[nm]] <- round(100 * c(r, sum(n_today * r, na.rm = TRUE) / sum(n_today)), 1)
   ex <- if (nm == names(FIVE)[3]) n_today - T1b[["Still operating in 5 yrs (current)"]][seq_len(N_CAT)]   # ties to the With Mergers tab
         else lr_int(n_today * r)
+  T7[[nm]] <- round(100 * c(r, sum(ex) / sum(n_today)), 1)   # total row from the whole-number exits, so it matches T7b
   T7b[[sub(" \\(%\\)", "", nm)]] <- c(as.integer(ex), as.integer(sum(ex)))
 }
 T7c <- data.frame(Category = c(CAT_PRETTY[CAT_LABELS], "All institutions"), check.names = FALSE, stringsAsFactors = FALSE)
@@ -569,8 +720,10 @@ T3_cell <- exp_tbl(c("region", "cu_type")) %>%
   rename(Region = region, Charter = cu_type)
 T3_state <- exp_tbl("state") %>% rename(State = state) %>% arrange(desc(`Expected exits 5yr`))
 cat("\nT3 -- expected exits by category:\n"); print(as.data.frame(T3_cat), row.names = FALSE)
-cat(sprintf("Total expected exits by %s: %.0f of %d (%.1f%%)\n", H_LAB["20"],
-            sum(coh$p20, na.rm = TRUE), nrow(coh), 100 * mean(coh$p20, na.rm = TRUE)))
+EXITS_5Y  <- as.integer(round(sum(coh$p20, na.rm = TRUE)))          # the published count (613)
+SHARE_5Y  <- round(100 * EXITS_5Y / nrow(coh), 1)                     # its share of the cohort (14.5) --
+## the same figure the With Mergers tab prints; the unrounded mean would round to 14.6 and disagree
+cat(sprintf("Total expected exits by %s: %d of %d (%.1f%%)\n", H_LAB["20"], EXITS_5Y, nrow(coh), SHARE_5Y))
 
 ## ---------------------------------------------------------------------
 ## [32.4] T4 -- who absorbs whom, by asset category
@@ -659,6 +812,8 @@ coh <- coh %>% left_join(fc_now %>% select(join_number, tier), by = "join_number
 T5_now <- coh %>% group_by(Category = CAT_PRETTY[as.character(asset_cat_now)], tier) %>%
   summarise(n = n(), .groups = "drop") %>%
   pivot_wider(names_from = tier, values_from = n, values_fill = 0)
+T5_now <- T5_now[order(match(T5_now$Category, CAT_PRETTY[CAT_LABELS])), ]
+names(T5_now)[names(T5_now) == "NA"] <- "Not scored (no history at the cohort date)"
 cat("\nT5 -- cohort institutions by category and tier:\n"); print(as.data.frame(T5_now), row.names = FALSE)
 
 ## ---------------------------------------------------------------------
@@ -715,7 +870,7 @@ chr <- function(x) { x[] <- lapply(x, function(v) if (is.factor(v)) as.character
 readme <- data.frame(
   Tab = c("Merger rate by size", "History", "Expected exits", "Who absorbs whom", "Risk tiers"),
   `What it shows` = c(
-    "The chance that a credit union merges or closes within one, three or five years: by asset category, and by asset size from $1M to $10B. Read your institution's category or size down the first column.",
+    sprintf("What happened over the last five years (%s to %s): the credit unions active then, how many merged or closed, how each size class changed and why -- beside the forecast for the next five. Then the chance that a credit union merges or closes within one, three or five years, by asset category and by asset size from $1M to $10B.", qgrid$q_label[N_Q - 20L], cohort_lab),
     "The one-year merger rate for every year since 2007, and the long-run average. This is where the 'current' adjustment on the first tab comes from.",
     "How many of today's institutions are expected to merge or close by each date, by asset category, by region and charter, and by state. Counts, not names.",
     sprintf("Every merger since %d: the size category of the credit union absorbed (rows) against the size category of the acquirer (columns).", START_YEAR),
@@ -754,7 +909,14 @@ SHm <- list(
 
   sheet32("Merger rate by size", "Merger rate by asset size",
           sprintf("Share of credit unions of each size that merge or close within the horizon. Cohort %s.", cohort_lab),
-          notes = c(if (CAT_FAMILY) "'Long-run' is the historical average from every credit union since 2005: in the category table, the share of institutions in that category, at any date, that had merged or closed within the horizon; in the size table, a smooth curve through the same record by asset size."
+          notes = c(sprintf("THE LAST FIVE YEARS AS THEY HAPPENED. The first four tables are the record: every credit union in the panel at %s, what became of it by %s (merged or closed; still operating, in the same, a larger or a smaller category%s), and how each category's count changed and why -- exits, institutions growing or shrinking across a category line, and %s new since. 'Then and now' sets that record beside the forecast for %s to %s%s. The realised share for the two largest categories rests on a handful of events and is not a rate.",
+                            hist_lab, cohort_lab,
+                            if (sum(H$other) > 0) sprintf("; %d left the panel for another reason", sum(H$other)) else "",
+                            format(nrow(entrants), big.mark = ","), cohort_lab, H_LAB_DATE["20"],
+                            if (!is.null(fc_5y)) sprintf(" -- the forecast counts come from %s", fc_5y_src) else ""),
+                    sprintf("'1 yr / 3 yrs / 5 yrs ahead' is the horizon: the share expected to merge or close within the NEXT one, three or five years (by %s, %s and %s). It is never the years just gone; the last one to five years enter only through the current factor, which compares the recent pace of mergers with the long-run pace over a window as long as the horizon.",
+                            H_LAB_DATE["4"], H_LAB_DATE["12"], H_LAB_DATE["20"]),
+                    if (CAT_FAMILY) "'Long-run' is the historical average from every credit union since 2005: in the category table, the share of institutions in that category, at any date, that had merged or closed within the horizon; in the size table, a smooth curve through the same record by asset size."
                     else "'Long-run' is the historical average for institutions of that size, from every credit union since 2005.",
                     sprintf("'Current' scales the long-run rate by %s. See History. A factor of 1.00 means that size class is merging at its long-run pace; 1.50 means half again as fast. The 'Factor' columns show the factor applied in each category at each horizon.", ENV_DESC),
                     "'Current, per year' is the current five-year rate expressed as a constant annual rate.",
@@ -762,11 +924,19 @@ SHm <- list(
                     else "The category table is the average of the size curve over the institutions in each category today; the size table is the curve itself, so a credit union between two rows sits between their values.",
                     if (!CAT_FAMILY) "'Realised 5yr since 2005' is the raw record: the share of institutions in that category, at any point since 2005, that had exited five years later.",
                     "'Still operating in 5 yrs' is today's count less the expected exits at each five-year rate: the institutions still in the system in five years, whatever their size by then (some will have moved category)."),
-          blocks = list(list(head = "By asset category: share exiting within the horizon (%)",
+          blocks = list(list(head = sprintf("Then and now: the five years just gone (%s to %s, as they happened) beside the five ahead (%s to %s, as forecast)", hist_lab, cohort_lab, cohort_lab, H_LAB_DATE["20"]),
+                             df = chr(H3), styles = c(S_NORM, S_INT, S_INT, S_DEC, S_INT, S_INT, S_INT, S_INT, S_DEC, rep(S_INT, ncol(H3) - 9))),
+                        list(head = sprintf("What became of the credit unions active at %s, by their category then", hist_lab),
+                             df = chr(H1), styles = c(S_NORM, S_INT, S_INT, S_DEC, rep(S_INT, ncol(H1) - 4))),
+                        list(head = sprintf("Why each category's count changed, %s to %s", hist_lab, cohort_lab),
+                             df = chr(H2), styles = c(S_NORM, rep(S_INT, ncol(H2) - 1))),
+                        list(head = sprintf("The same five years by asset size at %s: the share that merged or closed, beside the long-run and current curves at that size", hist_lab),
+                             df = chr(H4), styles = c(S_NORM, S_INT, S_INT, rep(S_DEC, ncol(H4) - 3))),
+                        list(head = "By asset category: share exiting within the horizon (%)",
                              df = chr(T1b), styles = sty_T1b),   # styles by column NAME, see above
                         list(head = "By asset size: share exiting within the horizon (%)", df = chr(T1),
                              styles = c(S_NORM, rep(S_DEC, ncol(T1) - 1)))),
-          cols = col_widths(list(c(1, 1, 16), c(2, 2, 12), c(3, ncol(T1b), 17))), freeze = list(x = 1, y = 0)),
+          cols = col_widths(list(c(1, 1, 18), c(2, 2, 12), c(3, max(ncol(T1b), ncol(H3), ncol(H2)), 17))), freeze = list(x = 1, y = 0)),
 
   sheet32("History", "Merger rate by year",
           sprintf("Long-run averages: 1 year %.2f%%, 3 years %.2f%%, 5 years %.2f%%. System-wide environment factor at %s: %.2f.",
@@ -785,8 +955,8 @@ SHm <- list(
           cols = col_widths(list(c(1, 1, 30), c(2, 9, 20)))),
 
   sheet32("Expected exits", "Expected mergers and closures from today's institutions",
-          sprintf("Cohort %s. Total expected by %s: %.0f of %s (%.1f%%).", cohort_lab, H_LAB["20"],
-                  sum(coh$p20, na.rm = TRUE), format(nrow(coh), big.mark = ","), 100 * mean(coh$p20, na.rm = TRUE)),
+          sprintf("Cohort %s. Total expected by %s: %d of %s (%.1f%%).", cohort_lab, H_LAB["20"],
+                  EXITS_5Y, format(nrow(coh), big.mark = ","), SHARE_5Y),
           notes = c(if (CAT_FAMILY) "Each institution carries the current exit rate of its asset category (first tab); the table adds those up within each group. These are expected values rounded to one decimal, not counts of named institutions."
                     else "Each institution's own merger probability (from the rate curve at its assets) added up within each group. These are expected values rounded to one decimal, not counts of named institutions.",
                     if (P5_FROM_26) "The five-year total is the 'Merged or closed' figure on the growth workbook's With Mergers tab: both are built from the same institution-level probabilities.",
