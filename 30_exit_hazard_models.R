@@ -77,6 +77,40 @@ if (length(.cf) && exists("CFG")) {
   }
   rm(.cfgs)
 }
+## A copy of 00_config.R anywhere else in the project is never read: only the
+## working directory, its parent and the project root are searched. If another
+## copy exists (root, or up to two folders down -- Code/JK_Rqst, say) and
+## differs from the config in force, say so; and STOP when it is the newer of
+## the two, because that is a new settings file saved next to the scripts
+## instead of at the project root. (22 Sep 2026: the by-horizon window sat in
+## Code/JK_Rqst/00_config.R while the root copy still said 8L, and 30 ran on
+## the root copy.)
+if (exists("CFG")) local({
+  root  <- dirname(normalizePath(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"), mustWork = FALSE))
+  dirs  <- c(root, list.dirs(root, recursive = FALSE))
+  dirs  <- c(dirs, unlist(lapply(dirs[-1], list.dirs, recursive = FALSE)))
+  found <- normalizePath(list.files(dirs, "^00_config\\.R$", full.names = TRUE), mustWork = FALSE)
+  for (o in setdiff(found, .cf)) {
+    e <- new.env()
+    same <- tryCatch({ invisible(capture.output(sys.source(o, envir = e))); identical(e$CFG, CFG) },
+                     error = function(err) FALSE)
+    if (same) next
+    msg <- paste0("Another 00_config.R at ", o, " differs from the config in force (",
+                  if (length(.cf)) .cf[1] else "the session's settings",
+                  "). The scripts read only the project-root copy; a copy kept with the scripts is never used.")
+    if (length(.cf) && isTRUE(file.info(o)$mtime > file.info(.cf[1])$mtime))
+      stop(msg, " It is the NEWER of the two: copy it over ", .cf[1], ", delete it, and run again.", call. = FALSE)
+    warning(msg, " It is the older one; delete it.", call. = FALSE)
+  }
+})
+## Say which config is in force, so a settings file that was not replaced is
+## caught on the first line of the output rather than in the workbook. The md5
+## is the file's; the settings are the session's (they differ only after the
+## warning above, which keeps the session's).
+if (exists("CFG"))
+  cat("Config in force:", if (length(.cf)) sprintf("%s (md5 %s)", .cf[1], substr(unname(tools::md5sum(.cf[1])), 1, 8))
+                          else "(no 00_config.R found on disk; session settings)",
+      "| EXIT_MODEL =", CFG$EXIT_MODEL, "| EXIT_ENV_WINDOW_Q =", paste(CFG$EXIT_ENV_WINDOW_Q, collapse = " / "), "\n")
 rm(.cf)
 
 library(dplyr)
@@ -87,7 +121,7 @@ library(splines)     # base R; natural splines for the logit
 ## ---------------------------------------------------------------------
 ## [30.0] Objects
 ## ---------------------------------------------------------------------
-SCRIPT30_VERSION <- "2026-09-25a"
+SCRIPT30_VERSION <- "2026-09-25c"
 cat("30_exit_hazard_models.R version", SCRIPT30_VERSION, "\n")
 if (!exists("CAT_LABELS") || !exists("N_Q")) {   # 20's constants live in panel_prep.rds
   .pp <- readRDS("panel_prep.rds")
