@@ -37,21 +37,24 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr)
-SCRIPT34_VERSION <- "2026-09-25b"
+SCRIPT34_VERSION <- "2026-09-25c"
 cat("34_merger_table_by_region.R version", SCRIPT34_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
 ## [34.0] Objects
 ## ---------------------------------------------------------------------
-if (!exists("CAT_LABELS") || !exists("N_Q")) {
-  .pp <- readRDS("panel_prep.rds")
-  for (.k in c("CAT_LABELS", "CAT_PRETTY", "N_CAT", "N_Q", "START_YEAR", "qgrid", "REGIONS"))
-    if (!exists(.k) && !is.null(.pp[[.k]])) assign(.k, .pp[[.k]])
-  rm(.pp, .k)
-}
-if (!exists("panel"))    { .pp <- readRDS("panel_prep.rds"); panel <- .pp$panel; rm(.pp) }
-if (!exists("fc"))       { prb <- readRDS("panel_probs.rds");  list2env(prb, .GlobalEnv) }
-if (!exists("inst_out")) { asg <- readRDS("panel_assign.rds"); list2env(asg, .GlobalEnv) }
+## Loaded from disk UNCONDITIONALLY: this script may be run in a session
+## that holds objects of the same names from another project (a `panel`
+## without q_index stopped it on 25 Sep 2026).
+.pp <- readRDS("panel_prep.rds")
+for (.k in c("CAT_LABELS", "CAT_PRETTY", "N_CAT", "N_Q", "START_YEAR", "qgrid", "REGIONS"))
+  if (!is.null(.pp[[.k]])) assign(.k, .pp[[.k]])
+panel <- .pp$panel; rm(.pp, .k)
+fc       <- readRDS("panel_probs.rds")$fc
+inst_out <- readRDS("panel_assign.rds")$inst_out
+stopifnot(all(c("join_number", "q_index", "cat_k", "exit_q", "region", "cu_type") %in% names(panel)),
+          all(c("join_number", "cat_k") %in% names(fc)),
+          all(c("join_number", "region", "cu_type", "asset_cat_now", "cat_5y") %in% names(inst_out)))
 if (!exists("REG_LAB")) REG_LAB <- cfg_get("REG_LAB", c("1" = "Region 1", "2" = "Region 2", "3" = "Region 3", "8" = "ONES"))
 if (!exists("CT_LAB"))  CT_LAB  <- cfg_get("CT_LAB",  c("1" = "FCU", "2" = "FISCU"))
 EXIT_MODEL <- cfg_get("EXIT_MODEL", "cat_env2")
