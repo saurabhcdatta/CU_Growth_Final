@@ -57,7 +57,7 @@ CFG <- list(
   EXIT_RECENT_Q = 60L,      # 15 years of origins
   MIN_EXIT_POOL = 200L,     # thin category borrows the rate from the one below
   EXIT_MODEL    = "cat_env2", # verdict of 30 [30.6], 21 Sep 2026: level 1.01, allocation 10.8% (5yr CV) # "cat" | "cat_env" | "size" | "size_env" | "logit" | "cat_logit" | "size_logit" | "peer" | "peer_env" | "logit_cl" | "logit_fin" | "tree" -- decided by 30 [30.6]
-  REGION_CELL_BASIS = "start",   # 34: region/charter cell for the by-region tabs: "start" = 2021Q2 codes carried forward (stakeholders, 25 Sep 2026) | "today"
+  REGION_CELL_BASIS = "today",   # 34: region/charter cell for the by-region tabs: "today" = as in the growth workbook (decision 28 Sep 2026) | "start" = 2021Q2 codes carried forward
   ## Merger-environment window in quarters, BY HORIZON: the factor's memory matches the
   ## forecast's reach, max(8, h) -- decided 21 Sep 2026 on 33's rolling-origin test (same
   ## accuracy as 8 quarters everywhere; worst five-year miss 26% instead of 48%; five-year

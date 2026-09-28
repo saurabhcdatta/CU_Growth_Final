@@ -19,7 +19,7 @@
 ##      basis as the With Mergers tab.
 ## Cells are region x cu_type, and each credit union carries ONE cell in
 ## both tables, chosen by CELL_BASIS:
-##   "start" (default, the stakeholders' choice, 25 Sep 2026): the region
+##   "start": the region
 ##           and charter type it had at 2021Q2, carried forward unchanged
 ##           through 2026Q2 and 2031Q2; credit unions chartered since 2021Q2
 ##           take their region and charter type today. A tab then reads as
@@ -27,10 +27,12 @@
 ##           (R1_FCU: 1,442 -> 1,181 -> ...). Its 2026Q2 count will NOT
 ##           match the growth workbook's regional tab where the codes have
 ##           changed (R1_FCU is 1,088 on today's codes).
-##   "today": the region and charter type as of 2026Q2 (or at the last
-##           report for those that merged or closed earlier). Matches the
-##           growth workbook's regional tabs; the 2021Q2 column is then
-##           "today's Region 1 FCUs as they stood in 2021Q2".
+##   "today" (default; decision 28 Sep 2026 after the field compared the
+##           tabs with the growth workbook): the region and charter type as
+##           of 2026Q2 (or at the last report for those that merged or
+##           closed earlier). Matches the growth workbook's regional tabs
+##           exactly (R1_FCU 1,088, R1_FISCU 284); the 2021Q2 column is
+##           then "today's Region 1 FCUs as they stood in 2021Q2".
 ## Either way table A ends exactly where table B starts, the moves column
 ## is between size classes only, and the cell tabs sum exactly to the
 ## Total tab. ~157 institutions are coded to a different region or charter
@@ -50,7 +52,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr)
-SCRIPT34_VERSION <- "2026-09-28a"
+SCRIPT34_VERSION <- "2026-09-28b"
 cat("34_merger_table_by_region.R version", SCRIPT34_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -71,7 +73,7 @@ stopifnot(all(c("join_number", "q_index", "cat_k", "exit_q", "region", "cu_type"
 if (!exists("REG_LAB")) REG_LAB <- cfg_get("REG_LAB", c("1" = "Region 1", "2" = "Region 2", "3" = "Region 3", "8" = "ONES"))
 if (!exists("CT_LAB"))  CT_LAB  <- cfg_get("CT_LAB",  c("1" = "FCU", "2" = "FISCU"))
 EXIT_MODEL <- cfg_get("EXIT_MODEL", "cat_env2")
-CELL_BASIS <- cfg_get("REGION_CELL_BASIS", "start")     # "start" (2021Q2 codes carried forward) | "today"
+CELL_BASIS <- cfg_get("REGION_CELL_BASIS", "today")     # "today" (as in the growth workbook; decision 28 Sep 2026) | "start" (2021Q2 codes carried forward)
 stopifnot(CELL_BASIS %in% c("start", "today"))
 .ex <- readRDS("panel_exit.rds")
 stopifnot(identical(.ex$EXIT_MODEL, EXIT_MODEL), length(.ex$P_EXIT[["20"]]) == nrow(fc))
@@ -177,9 +179,9 @@ stopifnot(sum(B$moves) == 0, sum(B$exits) == sum(tot_ex), sum(B$end) == sum(tot_
 ## ---------------------------------------------------------------------
 ## [34.3] The tables, per cell and for the Total
 ## ---------------------------------------------------------------------
-tblA <- function(d, moves_lab) {
+tblA <- function(d, moves_lab, start_lab = sprintf("Credit unions, %s", hist_lab)) {
   out <- data.frame(`Size class` = cat_pretty, check.names = FALSE, stringsAsFactors = FALSE)
-  out[[sprintf("Credit unions, %s", hist_lab)]]           <- d$start
+  out[[start_lab]]                                        <- d$start
   out[[sprintf("Merged or closed by %s", cohort_lab)]]    <- d$exits
   out[["Share merged or closed (%)"]]                     <- round(100 * d$exits / pmax(d$start, 1), 1)
   out[[moves_lab]]                                        <- d$moves
@@ -205,7 +207,8 @@ A_tot <- A %>% group_by(k) %>% summarise(across(c(start, exits, other, new, move
 B_tot <- B %>% group_by(k) %>% summarise(across(c(today, exits, moves, end), sum), .groups = "drop")
 TA <- list(Total = tblA(A_tot, MV_TOT)); TB <- list(Total = tblB(B_tot, MV_TOT))
 for (cl in cells) {
-  TA[[cl]] <- tblA(A %>% filter(cell == cl) %>% arrange(k), MV_CELL)
+  TA[[cl]] <- tblA(A %>% filter(cell == cl) %>% arrange(k), MV_CELL,
+                   start_lab = if (CELL_BASIS == "today") sprintf("Credit unions, %s (as classified today)", hist_lab) else sprintf("Credit unions, %s", hist_lab))
   TB[[cl]] <- tblB(B %>% filter(cell == cl) %>% arrange(k), MV_CELL, tot_lab = "All size classes (this tab's mix)")
 }
 cat("\nTotal, table A:\n"); print(TA$Total, row.names = FALSE)
@@ -277,8 +280,8 @@ mk_tab <- function(nm, ttl, note_extra = character(0)) {
 basis_note <- if (CELL_BASIS == "start")
   sprintf("Each credit union is classified by the region and charter type it had at %s, carried forward unchanged through %s and %s, so each tab tells one story from %s to %s; credit unions chartered since %s take their region and charter type today. %d credit unions are coded to a different region or charter type today than at %s, so a tab's %s count can differ from the growth workbook's regional tab, which uses today's codes.",
           hist_lab, cohort_lab, H5_LAB, hist_lab, H5_LAB, hist_lab, N_CELL_CHANGED, hist_lab, cohort_lab) else
-  sprintf("Each credit union is classified by its region and charter type as of %s (or at its last report, if it merged or closed earlier), in both tables, so the %s count is the same in both and matches the growth workbook; %d credit unions are coded to a different region or charter type today than at %s.",
-          cohort_lab, cohort_lab, N_CELL_CHANGED, hist_lab)
+  sprintf("Each credit union is classified by its region and charter type as of %s (or at its last report, if it merged or closed earlier), in both tables, so this tab's %s count is the same in both tables and matches the growth workbook's regional tab. The %s column counts the same credit unions as they stood then; %d credit unions are coded to a different region or charter type today than at %s.",
+          cohort_lab, cohort_lab, hist_lab, N_CELL_CHANGED, hist_lab)
 SH <- list(mk_tab("Total", "All regions and charter types", paste("The region tabs add exactly to this tab.", basis_note)))
 for (cl in cells) SH[[length(SH) + 1]] <- mk_tab(cl, cell_title(cl),
   paste(basis_note, "The rate applied for each size class is the national merger rate and is the same on every tab; the 'All size classes' rate is those rates blended by this tab's own mix of sizes, so it differs between tabs. Expected numbers are the rates applied to this tab's credit unions, shown as whole numbers, so small groups may not divide back to the rate exactly; they are rounded within each size class so that the region tabs add to the Total, and the moves column absorbs that rounding, so its total on a region tab can read 1 or -1 rather than 0."))
