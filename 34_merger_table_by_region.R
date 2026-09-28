@@ -50,7 +50,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr)
-SCRIPT34_VERSION <- "2026-09-25e"
+SCRIPT34_VERSION <- "2026-09-28a"
 cat("34_merger_table_by_region.R version", SCRIPT34_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -189,14 +189,14 @@ tblA <- function(d, moves_lab) {
                                sum(d$moves), sum(d$new - d$other), sum(d$end))
   out
 }
-tblB <- function(d, moves_lab) {
+tblB <- function(d, moves_lab, tot_lab = "All size classes") {
   out <- data.frame(`Size class` = cat_pretty, check.names = FALSE, stringsAsFactors = FALSE)
   out[[sprintf("Credit unions, %s", cohort_lab)]]                    <- d$today
   out[[sprintf("Expected to merge or close by %s", H5_LAB)]]         <- d$exits
   out[["Rate applied (%)"]]                                          <- round(100 * as.numeric(rate_k[d$k]), 1)
   out[[moves_lab]]                                                   <- d$moves
   out[[sprintf("Credit unions, %s (forecast, with mergers)", H5_LAB)]] <- d$end
-  out[nrow(out) + 1, ] <- list("All size classes", sum(d$today), sum(d$exits), round(100 * sum(d$exits) / max(sum(d$today), 1), 1), sum(d$moves), sum(d$end))
+  out[nrow(out) + 1, ] <- list(tot_lab, sum(d$today), sum(d$exits), round(100 * sum(d$exits) / max(sum(d$today), 1), 1), sum(d$moves), sum(d$end))
   out
 }
 MV_TOT  <- "Moved to / from other size classes, net"
@@ -206,7 +206,7 @@ B_tot <- B %>% group_by(k) %>% summarise(across(c(today, exits, moves, end), sum
 TA <- list(Total = tblA(A_tot, MV_TOT)); TB <- list(Total = tblB(B_tot, MV_TOT))
 for (cl in cells) {
   TA[[cl]] <- tblA(A %>% filter(cell == cl) %>% arrange(k), MV_CELL)
-  TB[[cl]] <- tblB(B %>% filter(cell == cl) %>% arrange(k), MV_CELL)
+  TB[[cl]] <- tblB(B %>% filter(cell == cl) %>% arrange(k), MV_CELL, tot_lab = "All size classes (this tab's mix)")
 }
 cat("\nTotal, table A:\n"); print(TA$Total, row.names = FALSE)
 cat("\nTotal, table B:\n"); print(TB$Total, row.names = FALSE)
@@ -281,7 +281,7 @@ basis_note <- if (CELL_BASIS == "start")
           cohort_lab, cohort_lab, N_CELL_CHANGED, hist_lab)
 SH <- list(mk_tab("Total", "All regions and charter types", paste("The region tabs add exactly to this tab.", basis_note)))
 for (cl in cells) SH[[length(SH) + 1]] <- mk_tab(cl, cell_title(cl),
-  paste(basis_note, "In the forecast table the expected numbers are rounded within each size class so that the region tabs add to the Total; the moves column absorbs that rounding, so its total on a region tab can read 1 or -1 rather than 0."))
+  paste(basis_note, "The rate applied for each size class is the national merger rate and is the same on every tab; the 'All size classes' rate is those rates blended by this tab's own mix of sizes, so it differs between tabs. Expected numbers are the rates applied to this tab's credit unions, shown as whole numbers, so small groups may not divide back to the rate exactly; they are rounded within each size class so that the region tabs add to the Total, and the moves column absorbs that rounding, so its total on a region tab can read 1 or -1 rather than 0."))
 SH[[length(SH) + 1]] <- sheet34("Check", "Do the region tabs add to the Total tab?",
   "Column totals summed across the region tabs, beside the Total tab. Every difference should be 0.",
   blocks = list(list(head = NULL, df = CHK, styles = c(S_NORM, S_NORM, S_INT, S_INT, S_INT))),
