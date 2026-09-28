@@ -17,12 +17,25 @@
 ##      = the exit probabilities 26 applied (P_EXIT), survivors placed by
 ##      the growth model's median assignment (inst_out$cat_5y), the same
 ##      basis as the With Mergers tab.
-## Cells are region x cu_type, and each credit union is kept in the cell it
-## had at the START of each table (2021Q2 for A, today for B): the few that
-## changed region or charter type are not moved (user's simplifying
-## assumption, 25 Sep 2026; the count of such cases is printed and noted on
-## the Total tab). The moves column is therefore between size classes only,
-## and the cell tabs sum exactly to the Total tab.
+## Cells are region x cu_type, and each credit union carries ONE cell in
+## both tables, chosen by CELL_BASIS:
+##   "start" (default, the stakeholders' choice, 25 Sep 2026): the region
+##           and charter type it had at 2021Q2, carried forward unchanged
+##           through 2026Q2 and 2031Q2; credit unions chartered since 2021Q2
+##           take their region and charter type today. A tab then reads as
+##           one story, 2021Q2 -> 2026Q2 -> 2031Q2, on the 2021Q2 map
+##           (R1_FCU: 1,442 -> 1,181 -> ...). Its 2026Q2 count will NOT
+##           match the growth workbook's regional tab where the codes have
+##           changed (R1_FCU is 1,088 on today's codes).
+##   "today": the region and charter type as of 2026Q2 (or at the last
+##           report for those that merged or closed earlier). Matches the
+##           growth workbook's regional tabs; the 2021Q2 column is then
+##           "today's Region 1 FCUs as they stood in 2021Q2".
+## Either way table A ends exactly where table B starts, the moves column
+## is between size classes only, and the cell tabs sum exactly to the
+## Total tab. ~157 institutions are coded to a different region or charter
+## today than at 2021Q2 (mostly out of Region 1) -- that looks like a
+## region-code realignment in the source, not institutions moving.
 ## Whole numbers on every tab are allocated by largest remainder within
 ## each class so that the cell tabs add to the Total tab's integers; the
 ## moves column on the forecast table is the residual that closes the row.
@@ -37,7 +50,7 @@ if (!exists("CONFIG_LOADED")) {
 if (!exists("cfg_get")) cfg_get <- function(name, default) default
 setwd(cfg_get("DATA_DIR", "S:/Projects/Credit_Union_Growth_Forecast/Data"))
 library(dplyr); library(tidyr)
-SCRIPT34_VERSION <- "2026-09-25c"
+SCRIPT34_VERSION <- "2026-09-25e"
 cat("34_merger_table_by_region.R version", SCRIPT34_VERSION, "\n")
 
 ## ---------------------------------------------------------------------
@@ -58,6 +71,8 @@ stopifnot(all(c("join_number", "q_index", "cat_k", "exit_q", "region", "cu_type"
 if (!exists("REG_LAB")) REG_LAB <- cfg_get("REG_LAB", c("1" = "Region 1", "2" = "Region 2", "3" = "Region 3", "8" = "ONES"))
 if (!exists("CT_LAB"))  CT_LAB  <- cfg_get("CT_LAB",  c("1" = "FCU", "2" = "FISCU"))
 EXIT_MODEL <- cfg_get("EXIT_MODEL", "cat_env2")
+CELL_BASIS <- cfg_get("REGION_CELL_BASIS", "start")     # "start" (2021Q2 codes carried forward) | "today"
+stopifnot(CELL_BASIS %in% c("start", "today"))
 .ex <- readRDS("panel_exit.rds")
 stopifnot(identical(.ex$EXIT_MODEL, EXIT_MODEL), length(.ex$P_EXIT[["20"]]) == nrow(fc))
 p20 <- .ex$P_EXIT[["20"]]                      # five-year exit probability, aligned to fc$join_number
@@ -87,12 +102,21 @@ h1 <- panel %>% filter(q_index == N_Q) %>%
   transmute(join_number, k1 = cat_k, c1 = cell_of(region, cu_type))
 h0 <- h0 %>% left_join(h1, by = "join_number") %>%
   mutate(status = ifelse(!is.na(exit_q) & exit_q <= N_Q, "exit", ifelse(!is.na(k1), "survivor", "other")))
-## the simplifying assumption: a survivor keeps its start cell whatever its region / charter today
-N_CELL_CHANGED <- sum(h0$status == "survivor" & h0$c1 != h0$c0)
-h0$c1 <- ifelse(h0$status == "survivor", h0$c0, h0$c1)
+## ONE cell per institution, used in both tables
+last_cell <- panel %>% group_by(join_number) %>% slice_max(q_index, n = 1, with_ties = FALSE) %>% ungroup() %>%
+  transmute(join_number, c_last = cell_of(region, cu_type))
+today_cell <- inst_out %>% transmute(join_number, c_today = cell_of(region, cu_type))
+h0 <- h0 %>% left_join(last_cell, by = "join_number") %>% left_join(today_cell, by = "join_number")
+h0$c_use <- if (CELL_BASIS == "start") h0$c0 else ifelse(h0$status == "survivor" & !is.na(h0$c_today), h0$c_today, h0$c_last)
+N_CELL_CHANGED <- sum(h0$status == "survivor" & !is.na(h0$c_today) & h0$c_today != h0$c0)
+h0 <- h0 %>% mutate(c0 = c_use, c1 = ifelse(status == "survivor", c_use, c1)) %>% select(-c_last, -c_today, -c_use)
+cell_map <- h0 %>% select(join_number, cell = c0)                 # the 2021Q2 cohort's cells (as chosen above)
 today <- inst_out %>% filter(join_number %in% fc$join_number) %>%
   transmute(join_number, k = match(as.character(asset_cat_now), CAT_LABELS), cell = cell_of(region, cu_type))
 stopifnot(!anyNA(today$k))
+## today's cohort takes the SAME cell as in table A (2021Q2 codes under "start"); entrants keep today's cell
+today <- today %>% left_join(cell_map, by = "join_number", suffix = c("", ".a")) %>%
+  mutate(cell = ifelse(is.na(cell.a), cell, cell.a)) %>% select(-cell.a)
 entr <- today %>% filter(!(join_number %in% h0$join_number))          # new since the start date
 surv <- h0 %>% filter(status == "survivor")
 cells <- sort(unique(c(h0$c0, today$cell)))
@@ -117,10 +141,11 @@ if (any(A$chk != 0)) {
   print(A[A$chk != 0, ])
   stop("[34.1] the past table does not close in some (cell, class).")
 }
-## the class totals must still be today's cohort exactly (cells only redistribute)
-stopifnot(identical(as.integer(tapply(A$end, A$k, sum)), as.integer(table(factor(today$k, levels = seq_len(N_CAT))))))
-cat(sprintf("\nA -- %s to %s: %d institutions, %d merged or closed, %d other departures, %d survivors, %d new; %d cells; %d survivors changed region or charter type and are kept in their %s cell\n",
-            hist_lab, cohort_lab, nrow(h0), sum(A$exits), sum(A$other), nrow(surv), nrow(entr), length(cells), N_CELL_CHANGED, hist_lab))
+## table A must end exactly where table B starts: today's cohort by today's cell and class
+stopifnot(identical(A$end, cnt(today, "cell", "k")))
+cat(sprintf("\nA -- %s to %s: %d institutions, %d merged or closed, %d other departures, %d survivors, %d new; %d cells. %d survivors are coded to a different region or charter type today than at %s; cell basis = '%s' (%s)\n",
+            hist_lab, cohort_lab, nrow(h0), sum(A$exits), sum(A$other), nrow(surv), nrow(entr), length(cells), N_CELL_CHANGED, hist_lab, CELL_BASIS,
+            if (CELL_BASIS == "start") sprintf("%s codes carried forward", hist_lab) else "today's codes"))
 
 ## ---------------------------------------------------------------------
 ## [34.2] Table B -- the next five years, per (cell, class)
@@ -249,10 +274,14 @@ mk_tab <- function(nm, ttl, note_extra = character(0)) {
                         list(head = sprintf("The next five years, %s to %s, as forecast", cohort_lab, H5_LAB), df = TB[[nm]], styles = styB)),
           cols = col_widths(list(c(1, 1, 20), c(2, 7, 18))))
 }
-SH <- list(mk_tab("Total", "All regions and charter types",
-                  sprintf("The region tabs add exactly to this tab. Each credit union is kept in the region and charter type it had at the start of each table; %d survivors changed region or charter type between %s and %s and are shown in their %s region and charter type.", N_CELL_CHANGED, hist_lab, cohort_lab, hist_lab)))
+basis_note <- if (CELL_BASIS == "start")
+  sprintf("Each credit union is classified by the region and charter type it had at %s, carried forward unchanged through %s and %s, so each tab tells one story from %s to %s; credit unions chartered since %s take their region and charter type today. %d credit unions are coded to a different region or charter type today than at %s, so a tab's %s count can differ from the growth workbook's regional tab, which uses today's codes.",
+          hist_lab, cohort_lab, H5_LAB, hist_lab, H5_LAB, hist_lab, N_CELL_CHANGED, hist_lab, cohort_lab) else
+  sprintf("Each credit union is classified by its region and charter type as of %s (or at its last report, if it merged or closed earlier), in both tables, so the %s count is the same in both and matches the growth workbook; %d credit unions are coded to a different region or charter type today than at %s.",
+          cohort_lab, cohort_lab, N_CELL_CHANGED, hist_lab)
+SH <- list(mk_tab("Total", "All regions and charter types", paste("The region tabs add exactly to this tab.", basis_note)))
 for (cl in cells) SH[[length(SH) + 1]] <- mk_tab(cl, cell_title(cl),
-  sprintf("Each credit union is kept in the region and charter type it had at the start of each table (%s for the first, %s for the second); the few that changed region or charter type are not moved. In the forecast table the expected numbers are rounded within each size class so that the region tabs add to the Total; the moves column absorbs that rounding, so its total on a region tab can read 1 or -1 rather than 0.", hist_lab, cohort_lab))
+  paste(basis_note, "In the forecast table the expected numbers are rounded within each size class so that the region tabs add to the Total; the moves column absorbs that rounding, so its total on a region tab can read 1 or -1 rather than 0."))
 SH[[length(SH) + 1]] <- sheet34("Check", "Do the region tabs add to the Total tab?",
   "Column totals summed across the region tabs, beside the Total tab. Every difference should be 0.",
   blocks = list(list(head = NULL, df = CHK, styles = c(S_NORM, S_NORM, S_INT, S_INT, S_INT))),
